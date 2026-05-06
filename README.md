@@ -1,5 +1,9 @@
 # 🎵 3DSoundShell
 
+3DSoundShell is a music player for the 2DS and 3DS based on the popular 3DShell file explorer. As the name suggests, the code was written by [Claude.ai](https://claude.ai/new), and I created the app’s graphics and sound. The app isn’t finished yet—there are still some bugs to fix—but it can already play music with a nice interface.
+
+README by Claude ai
+
 Lecteur de musique homebrew pour Nintendo 3DS / 2DS  
 Interface inspirée de **3DShell** + moteur audio inspiré de **CTRMUS**
 
