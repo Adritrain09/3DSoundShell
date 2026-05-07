@@ -87,7 +87,7 @@ make 3dsx
 
 ---
 
-## 📲 Installation sur 3DS
+## 📲 Installation sur 3DS (.cia)
 
 1. Copiez `3DSoundShell.cia` sur votre carte SD
 2. Ouvrez **FBI** sur la 3DS
@@ -158,7 +158,8 @@ sdmc:/
 
 ## 📝 Notes
 
-- Nécessite **Luma3DS** (custom firmware) pour installer le .cia
+- Nécessite **Luma3DS** (custom firmware) pour installer le .cia (quand il sera dispo)
+- Nécessite **HomebrewLaucher** pour lancer le .3dsx
 - Le fichier `banner.bcwav` (son de démarrage) peut être remplacé par le vôtre
 - L'icône `romfs/gfx/icon.png` doit être en **48×48 pixels**
 - La bannière `romfs/gfx/banner.png` doit être en **256×128 pixels**
