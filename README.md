@@ -1,7 +1,9 @@
 # 🎵 3DSoundShell
 
 3DSoundShell est un lecteur de son pour 2/3DS basé sur le célèbre explorateur de fichier 3DShell comme son nom l'indique, le code a était fait par [Claude.ai](https://claude.ai/new) et les images / son de l'app on était fait par moi. L'application n'ai pas encore fini il y a des bugs a corrigé mais elle peux deja lire les musiques avec une joli interface.
-README by Claude ai
+README by Claude ai. Le projet n'ai pas encore fini donc si vous trouver des bugs signalé le et je test personellement sur New 2DS XL et bientot avec une 3DS classique.
+
+README créé par Claude ai:
 
 Lecteur de musique homebrew pour Nintendo 3DS / 2DS  
 Interface inspirée de **3DShell** + moteur audio inspiré de **CTRMUS**
