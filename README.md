@@ -159,7 +159,7 @@ sdmc:/
 ## 📝 Notes
 
 - Nécessite **Luma3DS** (custom firmware) pour installer le .cia (quand il sera dispo)
-- Nécessite **HomebrewLaucher** pour lancer le .3dsx
+- Nécessite **Homebrew Laucher** pour lancer le .3dsx
 - Le fichier `banner.bcwav` (son de démarrage) peut être remplacé par le vôtre
 - L'icône `romfs/gfx/icon.png` doit être en **48×48 pixels**
 - La bannière `romfs/gfx/banner.png` doit être en **256×128 pixels**
