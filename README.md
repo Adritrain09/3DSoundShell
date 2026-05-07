@@ -171,3 +171,5 @@ sdmc:/
 ## Licence
 
 Projet homebrew open-source. Aucune affiliation avec Nintendo.
+
+(petite précision de fin, je connais tres mal Github donc m'en voulait pas si certain truc mal fait sur ma page et aussi pour les fautes d'orthographe)
