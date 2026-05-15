@@ -1,0 +1,45 @@
+--- audio.c
++++ audio.c
+@@ -76,1 +76,17 @@
+-static void audio_thread_func(void *arg) { while(s_state != AUDIO_EXITING) { if(s_state == AUDIO_PLAYING) { for(int i=0;i<NUM_BUFS;i++) { if(s_wbufs[i].status==NDSP_WBUF_DONE) fill_buffer(i); } } svcSleepThread(10000000ULL); } }
++static void audio_thread_func(void *arg) {
++    while (s_state != AUDIO_EXITING) {
++        if (s_state == AUDIO_PLAYING) {
++            bool filled = false;
++            for (int i = 0; i < NUM_BUFS; i++) {
++                if (s_wbufs[i].status == NDSP_WBUF_DONE) {
++                    fill_buffer(i);
++                    filled = true;
++                }
++            }
+
+cat << 'EOF' > fix_freezes.patch
+--- audio.c
++++ audio.c
+@@ -76,1 +76,17 @@
+-static void audio_thread_func(void *arg) { while(s_state != AUDIO_EXITING) { if(s_state == AUDIO_PLAYING) { for(int i=0;i<NUM_BUFS;i++) { if(s_wbufs[i].status==NDSP_WBUF_DONE) fill_buffer(i); } } svcSleepThread(10000000ULL); } }
++static void audio_thread_func(void *arg) {
++    while (s_state != AUDIO_EXITING) {
++        if (s_state == AUDIO_PLAYING) {
++            bool filled = false;
++            for (int i = 0; i < NUM_BUFS; i++) {
++                if (s_wbufs[i].status == NDSP_WBUF_DONE) {
++                    fill_buffer(i);
++                    filled = true;
++                }
++            }
++            if (!filled) svcSleepThread(2000000ULL);
++        } else {
++            svcSleepThread(10000000ULL);
++        }
++        svcSleepThread(1000000ULL);
++    }
++}
+--- player_ui.c
++++ player_ui.c
+@@ -158,1 +158,2 @@
+     if(px) {
+         upload_cover_tex(ui, px, w, h);
++        stbi_image_free(px);
+         ui->cover_loaded = true;
+     }

@@ -1,9 +1,5 @@
 # 🎵 3DSoundShell
 
-3DSoundShell est un lecteur de son pour 2/3DS basé sur le célèbre explorateur de fichier 3DShell (comme le nom de l'app l'indique), le code a était fait par [Claude.ai](https://claude.ai/new) et les images / son de l'app on était fait par moi. L'application n'ai pas encore fini il y a des bugs a corrigé mais elle peux deja lire les musiques avec une joli interface. Le projet n'ai pas encore fini donc si vous trouver des bugs signaler les. Personnellement je test l'app avec une New 2DS XL et maintenant avec une 3DS classique!
-
-README créé par Claude ai:
-
 Lecteur de musique homebrew pour Nintendo 3DS / 2DS  
 Interface inspirée de **3DShell** + moteur audio inspiré de **CTRMUS**
 
@@ -88,7 +84,7 @@ make 3dsx
 
 ---
 
-## 📲 Installation sur 3DS (.cia)
+## 📲 Installation sur 3DS
 
 1. Copiez `3DSoundShell.cia` sur votre carte SD
 2. Ouvrez **FBI** sur la 3DS
@@ -159,8 +155,7 @@ sdmc:/
 
 ## 📝 Notes
 
-- Nécessite **Luma3DS** (custom firmware) pour installer le .cia (quand il sera dispo)
-- Nécessite **Homebrew Laucher** pour lancer le .3dsx
+- Nécessite **Luma3DS** (custom firmware) pour installer le .cia
 - Le fichier `banner.bcwav` (son de démarrage) peut être remplacé par le vôtre
 - L'icône `romfs/gfx/icon.png` doit être en **48×48 pixels**
 - La bannière `romfs/gfx/banner.png` doit être en **256×128 pixels**
@@ -171,5 +166,3 @@ sdmc:/
 ## Licence
 
 Projet homebrew open-source. Aucune affiliation avec Nintendo.
-
-(petite précision de fin, je connais tres mal Github donc m'en voulait pas si certain truc mal fait sur ma page et aussi pour les fautes d'orthographe)
