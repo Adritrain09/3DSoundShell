@@ -1,8 +1,8 @@
 # 🎵 3DSoundShell
 
-Lecteur de musique homebrew pour Nintendo 3DS / 2DS  
-Interface inspirée de **3DShell** + moteur audio inspiré de **CTRMUS**
+Ceci est un lecteur de music pour la 2/3DS inspiré de **3DShell** et de **CTRMUS**, fait avec [claude ai](claude.ai/new) et [Arena](arena.ai). Le lecteur est toujours en test et n'a pas de version fini, mais j'y travail encore malgré les limites de messages imposé par les sites (et le tout se qui est écrit dans le README est se qu'il devait y avoir de base, je le modifirais une fois la V1 faite). Les test sont effectué avec une *New 2DS XL* et maintenant avec une *3DS classique*.
 
+README généré par claude.ai
 ---
 
 ## ✨ Fonctionnalités
@@ -166,3 +166,8 @@ sdmc:/
 ## Licence
 
 Projet homebrew open-source. Aucune affiliation avec Nintendo.
+
+---
+
+## Truc en plus
+Du fait que je ne sais pas codé je dois demandé a des IA, donc ne me demandé pas de codé un truc en plus je ne serais pas faire. Et désolé pour les fautes d'orthographes.
