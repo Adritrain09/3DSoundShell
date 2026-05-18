@@ -7,7 +7,7 @@ README généré par claude.ai
 
 ## ✨ Fonctionnalités
 
-- 🎵 **Formats supportés** : MP3, MP2, OGG/Vorbis, FLAC, WAV, AAC, M4A, OPUS, WMA, AIFF
+- 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS, AIFF
 - 🎨 **Thèmes** : Dark, Light, Neon Purple, Forest — et thèmes personnalisés via fichier .ini
 - 📁 **Explorateur de fichiers** style 3DShell (tri dossiers/fichiers, navigation complète)
 - 📋 **Playlist** avec sauvegarde .m3u, chargement automatique
