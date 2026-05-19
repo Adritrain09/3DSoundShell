@@ -1,8 +1,8 @@
 # 🎵 3DSoundShell
 
-Ceci est un lecteur de music pour la 2/3DS inspiré de **3DShell** et de **CTRMUS**, fait avec [claude ai](claude.ai/new) et [Arena](arena.ai). Le lecteur est toujours en test et n'a pas de version fini, mais j'y travail encore malgré les limites de messages imposé par les sites (et le tout se qui est écrit dans le README est se qu'il devait y avoir de base, je le modifirais une fois la V1 faite). Les test sont effectué avec une *New 2DS XL* et maintenant avec une *3DS classique*.
+Ceci est un lecteur de music pour la 2/3DS inspiré de **3DShell** et de **CTRMUS**, fait avec [claude ai](claude.ai/new) et [Arena](arena.ai). Le lecteur est toujours en test et n'auras pas de version réellement fini, mais j'y travail encore malgré les limites de messages imposé par les sites (et le tout se qui est écrit dans le README est se qu'il devait y avoir a la fin). Les test sont effectué avec une *New 2DS XL* et une *3DS classique*.
 
-README généré par claude.ai
+README généré par claude.ai et modifié par moi:
 ---
 
 ## ✨ Fonctionnalités
@@ -10,13 +10,12 @@ README généré par claude.ai
 - 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS, AIFF
 - 🎨 **Thèmes** : Dark, Light, Neon Purple, Forest — et thèmes personnalisés via fichier .ini
 - 📁 **Explorateur de fichiers** style 3DShell (tri dossiers/fichiers, navigation complète)
-- 📋 **Playlist** avec sauvegarde .m3u, chargement automatique
 - 🔀 **Lecture aléatoire** (Fisher-Yates shuffle)
 - 🔁 **Répétition** : Désactivée / Une piste / Toute la playlist
 - 📊 **Visualiseur audio** : 3 styles (Barres, Onde, Cercle radial)
-- 🖼️ **Pochettes d'album** (ID3v2, Vorbis comment, FLAC)
+- 🖼️ **Pochettes d'album** (sir les formats compatible)
 - 🎚️ **Égaliseur 8 bandes** : -12dB à +12dB, 6 présets intégrés
-- 💾 **Sauvegarde automatique** (position, piste, réglages)
+- 💾 **Sauvegarde automatique** (piste, réglages)
 - ▶️ **Reprise automatique** au démarrage (optionnel)
 
 ---
@@ -106,17 +105,26 @@ Créez un fichier `.ini` dans `sdmc:/3DSoundShell/themes/` :
 
 ```ini
 name=Mon Thème
-bg_primary=0xFF121218
-bg_secondary=0xFF1E1E28
-accent=0xFF50A0FF
-accent2=0xFFFF64B4
-text_primary=0xFFE6E6F0
-text_secondary=0xFFA0A0B4
-text_accent=0xFF64B4FF
-progress_fill=0xFF50A0FF
+bg_primary=0x004f5dff
+bg_secondary=0x003b47ff
+bg_header=0x002731ff
+bg_selected=0x007a8eff
+bg_playing=0x006375ff
+text_primary=0x3ef0ffff
+text_secondary=0x00b2c4ff
+text_accent=0x00ffd5ff
+text_disabled=0x005663ff
+accent=0x001f26ff
+accent2=0x008da3ff
+border=0x006d80ff
+scrollbar=0x005563ff
+progress_bg=0x002e38ff
+progress_fill=0x00ffd5ff
+eq_bar=0x3ef0ffff
+eq_handle=0xe0fbffff
 ```
 
-Les couleurs sont au format `0xAARRGGBB` (alpha, rouge, vert, bleu en hexadécimal).
+Les couleurs sont au format `0xRRGGBBFF`.
 
 ---
 
