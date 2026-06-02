@@ -32,17 +32,21 @@ void eq_draw_top(int selected_band)
     Theme *th=current_theme;
     draw_rect(0,0,TOP_WIDTH,TOP_HEIGHT,th->bg_primary);
     draw_rect(0,0,TOP_WIDTH,26,th->bg_header);
-    draw_text(8,5,0.55f,th->text_accent,"3DSoundShell  —  Égaliseur");
+    draw_text(8,5,0.55f,th->text_accent,"3DSoundShell - Egaliseur");
 
     float bar_w=34, gap=12;
     float total=EQ_SCREEN_BANDS*(bar_w+gap)-gap;
     float start_x=(TOP_WIDTH-total)/2.f;
     float bar_area_h=130;
     float bar_y_base=160;
-    float db_scale=bar_area_h/24.f; // 24dB range: -12 to +12
+    float db_scale=bar_area_h/24.f;
 
-    // Zero line
-    draw_rect(start_x-5, bar_y_base-bar_area_h/2.f, total+10, 1, th->border);
+    /* Fond EQ */
+    draw_rect(start_x-5, bar_y_base-bar_area_h/2.f-5,
+              total+10, bar_area_h+10, th->eq_bg);
+
+    /* Ligne zero */
+    draw_rect(start_x-5, bar_y_base-bar_area_h/2.f, total+10, 1, th->eq_zero_line);
     draw_text(start_x-30, bar_y_base-bar_area_h/2.f-6, 0.38f, th->text_disabled,"+12");
     draw_text(start_x-30, bar_y_base-6,                0.38f, th->text_disabled,"  0");
     draw_text(start_x-30, bar_y_base+bar_area_h/2.f-6, 0.38f, th->text_disabled,"-12");
@@ -51,44 +55,52 @@ void eq_draw_top(int selected_band)
         float x=start_x+i*(bar_w+gap);
         float gain=audio_eq_get_gain(i);
         float bh=gain*db_scale;
-        float by=(bh>=0)? bar_y_base-bar_area_h/2.f + (bar_area_h/2.f-bh)
-                        : bar_y_base-bar_area_h/2.f + bar_area_h/2.f;
-        if(bh<0) { by=bar_y_base-bar_area_h/2.f+bar_area_h/2.f; bh=-bh; }
+        bool positive=(gain>=0);
+        float by=(bh>=0)? bar_y_base-bar_area_h/2.f+(bar_area_h/2.f-bh)
+                        : bar_y_base-bar_area_h/2.f+bar_area_h/2.f;
+        if(bh<0){by=bar_y_base-bar_area_h/2.f+bar_area_h/2.f;bh=-bh;}
 
-        /* Couleur degradee selon theme */
-        u32 bar_col = th->visualizer_bars[i];
-        if(i != selected_band) {
+        /* Couleur selon etat */
+        u32 bar_col;
+        if(i==selected_band)
+            bar_col=th->eq_bar_selected;
+        else if(positive)
+            bar_col=th->eq_bar_positive;
+        else
+            bar_col=th->eq_bar_negative;
+
+        /* Attenue si pas selectionne */
+        if(i!=selected_band){
             u8 r=(bar_col>>0)&0xff;
             u8 g2=(bar_col>>8)&0xff;
             u8 b2=(bar_col>>16)&0xff;
-            bar_col = RGBA8(r*2/3, g2*2/3, b2*2/3, 200);
+            bar_col=RGBA8(r*3/4,g2*3/4,b2*3/4,220);
         }
 
-        /* Barre principale */
-        draw_rect(x, by, bar_w, bh<2?2:bh, bar_col);
+        /* Barre */
+        draw_rect(x,by,bar_w,bh<2?2:bh,bar_col);
 
         /* Reflet */
-        if(bh > 2) {
+        if(bh>3){
             u8 r=(bar_col>>0)&0xff;
             u8 g2=(bar_col>>8)&0xff;
             u8 b2=(bar_col>>16)&0xff;
-            draw_rect(x, by+bh, bar_w, bh*0.15f, RGBA8(r,g2,b2,60));
+            draw_rect(x,by+bh,bar_w,bh*0.12f,RGBA8(r,g2,b2,50));
         }
 
-        /* Handle selection */
+        /* Handle */
         if(i==selected_band)
-            draw_rect(x-2, by-4, bar_w+4, 8, th->eq_handle);
+            draw_rect(x-2,by-4,bar_w+4,8,th->eq_handle);
 
-        /* Label frequence */
-        draw_text(x+2, bar_y_base+bar_area_h/2.f+4, 0.38f,
-            i==selected_band ? th->text_accent : th->text_disabled,
+        /* Label */
+        draw_text(x+2,bar_y_base+bar_area_h/2.f+4,0.38f,
+            i==selected_band?th->text_accent:th->text_disabled,
             band_labels[i]);
 
-        /* Valeur dB */
+        /* dB */
         char db[8]; snprintf(db,8,"%.1f",audio_eq_get_gain(i));
-        draw_text(x+2, by-14, 0.38f,
-            i==selected_band ? th->text_accent : th->text_secondary,
-            db);
+        draw_text(x+2,by-14,0.38f,
+            i==selected_band?th->text_accent:th->text_secondary,db);
     }
 }
 
