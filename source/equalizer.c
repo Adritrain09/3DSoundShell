@@ -2,6 +2,9 @@
 #include "main.h"
 #include "theme.h"
 #include <citro2d.h>
+
+/* ── TextBuf global ── */
+
 #include <string.h>
 #include <stdio.h>
 
@@ -14,11 +17,14 @@ static void draw_rect(float x,float y,float w,float h,u32 c)
 { C2D_DrawRectSolid(x,y,0,w,h,c); }
 static void draw_text(float x,float y,float sz,u32 c,const char *t)
 {
-    C2D_Text tx; C2D_TextBuf tb=C2D_TextBufNew(256);
-    C2D_TextParse(&tx,tb,t);
+    if(!t||!t[0]) return;
+    g_textbuf_init();
+    C2D_TextBufClear(g_textbuf);
+    C2D_TextBufClear(g_textbuf);
+    C2D_Text tx;
+    C2D_TextParse(&tx,g_textbuf,t);
     C2D_TextOptimize(&tx);
     C2D_DrawText(&tx,C2D_AlignLeft|C2D_WithColor,x,y,0,sz,sz,c);
-    C2D_TextBufDelete(tb);
 }
 
 void eq_draw_top(int selected_band)
@@ -112,3 +118,4 @@ void eq_handle_input(int *selected_band, u32 keys_down)
         for(int i=0;i<EQ_SCREEN_BANDS;i++) audio_eq_set_gain(i,0);
     }
 }
+

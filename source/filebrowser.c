@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <citro2d.h>
 
+/* ── TextBuf global ── */
+
+
 #define ROW_H      22
 #define LIST_Y     30
 #define LIST_X     6
@@ -101,11 +104,12 @@ static void draw_rect(float x,float y,float w,float h,u32 col)
 
 static void draw_text(float x,float y,float sz,u32 col,const char *txt)
 {
-    C2D_Text t; C2D_TextBuf tb = C2D_TextBufNew(512);
-    C2D_TextParse(&t, tb, txt);
+    g_textbuf_init();
+    C2D_TextBufClear(g_textbuf);
+    C2D_Text t;
+    C2D_TextParse(&t, g_textbuf, txt);
     C2D_TextOptimize(&t);
     C2D_DrawText(&t,C2D_AlignLeft|C2D_WithColor,x,y,0,sz,sz,col);
-    C2D_TextBufDelete(tb);
 }
 
 // Top screen: show current path + big title

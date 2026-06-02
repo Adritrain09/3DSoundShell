@@ -1,6 +1,10 @@
 #include "theme.h"
 #include <stdio.h>
 #include <string.h>
+#include <citro2d.h>
+
+/* Buffer texte GLOBAL unique pour toute lapp */
+C2D_TextBuf g_textbuf = NULL;
 
 // ─── Dark theme (default) ─────────────────────────────────────
 Theme theme_dark = {
@@ -130,51 +134,168 @@ Theme theme_forest = {
     .eq_handle= RGB8(200, 255, 220),
 };
 
+// ─── Custom theme (chargé depuis SD:/3DSoundShell/theme.ini) ──
+Theme theme_custom = {
+    .name          = "Custom (vide)",
+    .bg_primary    = RGB8(18,  18,  24),
+    .bg_secondary  = RGB8(30,  30,  40),
+    .bg_header     = RGB8(12,  12,  18),
+    .bg_selected   = RGB8(50,  50,  80),
+    .bg_playing    = RGB8(30,  60,  90),
+    .text_primary  = RGB8(230, 230, 240),
+    .text_secondary= RGB8(160, 160, 180),
+    .text_accent   = RGB8(100, 180, 255),
+    .text_disabled = RGB8(80,  80,  100),
+    .accent        = RGB8(80,  160, 255),
+    .accent2       = RGB8(255, 100, 180),
+    .border        = RGB8(50,  50,  70),
+    .scrollbar     = RGB8(80,  80,  110),
+    .progress_bg   = RGB8(40,  40,  60),
+    .progress_fill = RGB8(80,  160, 255),
+    .visualizer_bars = {
+        RGB8(80,  120, 255),
+        RGB8(90,  140, 255),
+        RGB8(100, 170, 255),
+        RGB8(120, 200, 255),
+        RGB8(140, 220, 240),
+        RGB8(160, 230, 200),
+        RGB8(180, 230, 150),
+        RGB8(200, 220, 100),
+    },
+    .eq_bar   = RGB8(80, 160, 255),
+    .eq_handle= RGB8(255, 255, 255),
+};
+static bool custom_theme_loaded = false;
+
 // ─── Registry ─────────────────────────────────────────────────
-static Theme *themes[]  = { &theme_dark, &theme_light, &theme_purple, &theme_forest };
-static int    theme_cnt = 4;
+static Theme *themes[]  = { 
+    &theme_dark, 
+    &theme_light, 
+    &theme_purple, 
+    &theme_forest,
+    &theme_custom
+};
+static int    theme_cnt = 5;
 Theme *current_theme    = &theme_dark;
 
-void theme_init(void)   { current_theme = &theme_dark; }
+// ─── theme_init ───────────────────────────────────────────────
+void theme_init(void)
+{
+    Theme tmp = theme_custom;  // Copie les valeurs par défaut
+
+    if(theme_load_from_file("sdmc:/3DSoundShell/theme.ini", &tmp)) {
+        theme_custom = tmp;
+        custom_theme_loaded = true;
+        if(theme_custom.name[0] == '\0')
+            snprintf(theme_custom.name, 64, "Custom");
+    } else {
+        custom_theme_loaded = false;
+        snprintf(theme_custom.name, 64, "Custom (vide)");
+    }
+
+    current_theme = &theme_dark;  // Dark par défaut au démarrage
+}
+
 void theme_set(Theme *t){ current_theme = t; }
 int  theme_count(void)  { return theme_cnt; }
 Theme *theme_get(int i) { if(i<0||i>=theme_cnt) return &theme_dark; return themes[i]; }
 const char *theme_name(int i) { return theme_get(i)->name; }
 
-// ─── INI file loader/saver (basic) ───────────────────────────
+// ─── INI file loader ──────────────────────────────────────────
 bool theme_load_from_file(const char *path, Theme *out)
 {
     FILE *f = fopen(path, "r");
     if(!f) return false;
-    // Simple key=value parser
-    char line[128]; char key[64]; unsigned int val;
+    char line[256];
     while(fgets(line, sizeof(line), f)) {
-        if(sscanf(line, "name=%63s", out->name)==1) continue;
-        if(sscanf(line, "bg_primary=0x%x", &val)==1){ out->bg_primary=val; continue; }
-        if(sscanf(line, "bg_secondary=0x%x",&val)==1){ out->bg_secondary=val; continue; }
-        if(sscanf(line, "accent=0x%x",&val)==1){ out->accent=val; continue; }
-        if(sscanf(line, "accent2=0x%x",&val)==1){ out->accent2=val; continue; }
-        if(sscanf(line, "text_primary=0x%x",&val)==1){ out->text_primary=val; continue; }
-        if(sscanf(line, "text_secondary=0x%x",&val)==1){ out->text_secondary=val; continue; }
-        if(sscanf(line, "text_accent=0x%x",&val)==1){ out->text_accent=val; continue; }
-        if(sscanf(line, "progress_fill=0x%x",&val)==1){ out->progress_fill=val; continue; }
+        char *p=line; while(*p==' '||*p=='\t') p++;
+        if(*p==';'||*p=='#'||*p=='\n'||*p=='\r'||*p==0) continue;
+        line[strcspn(line,"\r\n")]=0;
+        char *eq=strchr(line,'=');
+        if(!eq) continue;
+        *eq=0; char *key=line; char *val=eq+1;
+        while(*key==' ') key++;
+        while(*val==' ') val++;
+
+        // ─── Lecture couleur ──────────────────────────────────
+        u32 ival = 0;
+        bool color_ok = false;
+        unsigned int raw = 0;
+
+        if(val[0]=='0' && (val[1]=='x'||val[1]=='X')) {
+            if(sscanf(val, "0x%08x", &raw) == 1) {
+                // Format 0xRRGGBBFF (8 chiffres)
+                unsigned int r = (raw >> 24) & 0xFF;
+                unsigned int g = (raw >> 16) & 0xFF;
+                unsigned int b = (raw >>  8) & 0xFF;
+                ival = RGB8(r, g, b);
+                color_ok = true;
+            } else if(sscanf(val, "0x%06x", &raw) == 1) {
+                // Format 0xRRGGBB (6 chiffres)
+                unsigned int r = (raw >> 16) & 0xFF;
+                unsigned int g = (raw >>  8) & 0xFF;
+                unsigned int b = (raw      ) & 0xFF;
+                ival = RGB8(r, g, b);
+                color_ok = true;
+            }
+        }
+
+        if(color_ok) {
+            if(!strcmp(key,"bg_primary"))     out->bg_primary    = ival;
+            if(!strcmp(key,"bg_secondary"))   out->bg_secondary  = ival;
+            if(!strcmp(key,"bg_header"))      out->bg_header     = ival;
+            if(!strcmp(key,"bg_selected"))    out->bg_selected   = ival;
+            if(!strcmp(key,"bg_playing"))     out->bg_playing    = ival;
+            if(!strcmp(key,"text_primary"))   out->text_primary  = ival;
+            if(!strcmp(key,"text_secondary")) out->text_secondary= ival;
+            if(!strcmp(key,"text_accent"))    out->text_accent   = ival;
+            if(!strcmp(key,"text_disabled"))  out->text_disabled = ival;
+            if(!strcmp(key,"accent"))         out->accent        = ival;
+            if(!strcmp(key,"accent2"))        out->accent2       = ival;
+            if(!strcmp(key,"border"))         out->border        = ival;
+            if(!strcmp(key,"scrollbar"))      out->scrollbar     = ival;
+            if(!strcmp(key,"progress_bg"))    out->progress_bg   = ival;
+            if(!strcmp(key,"progress_fill"))  out->progress_fill = ival;
+            if(!strcmp(key,"eq_bar"))         out->eq_bar        = ival;
+            if(!strcmp(key,"eq_handle"))      out->eq_handle     = ival;
+        }
+
+        // ─── Lecture nom ──────────────────────────────────────
+        if(!strcmp(key,"name"))
+            snprintf(out->name, 64, "%s", val);
     }
     fclose(f);
     return true;
 }
 
+// ─── INI file saver ───────────────────────────────────────────
 void theme_save_to_file(const char *path, const Theme *t)
 {
     FILE *f = fopen(path, "w");
     if(!f) return;
-    fprintf(f, "name=%s\n",            t->name);
-    fprintf(f, "bg_primary=0x%08X\n",  t->bg_primary);
-    fprintf(f, "bg_secondary=0x%08X\n",t->bg_secondary);
-    fprintf(f, "accent=0x%08X\n",      t->accent);
-    fprintf(f, "accent2=0x%08X\n",     t->accent2);
-    fprintf(f, "text_primary=0x%08X\n",t->text_primary);
-    fprintf(f, "text_secondary=0x%08X\n",t->text_secondary);
-    fprintf(f, "text_accent=0x%08X\n", t->text_accent);
-    fprintf(f, "progress_fill=0x%08X\n",t->progress_fill);
+    fprintf(f, "name=%s\n",              t->name);
+    fprintf(f, "bg_primary=0x%08lX\n",   t->bg_primary);
+    fprintf(f, "bg_secondary=0x%08lX\n", t->bg_secondary);
+    fprintf(f, "accent=0x%08lX\n",       t->accent);
+    fprintf(f, "accent2=0x%08lX\n",      t->accent2);
+    fprintf(f, "text_primary=0x%08lX\n", t->text_primary);
+    fprintf(f, "text_secondary=0x%08lX\n",t->text_secondary);
+    fprintf(f, "text_accent=0x%08lX\n",  t->text_accent);
+    fprintf(f, "progress_fill=0x%08lX\n",t->progress_fill);
     fclose(f);
+}
+
+// ─── Text buffer ──────────────────────────────────────────────
+void g_textbuf_init(void)
+{
+    if(!g_textbuf)
+        g_textbuf = C2D_TextBufNew(4096);
+}
+
+void g_textbuf_exit(void)
+{
+    if(g_textbuf){
+        C2D_TextBufDelete(g_textbuf);
+        g_textbuf = NULL;
+    }
 }

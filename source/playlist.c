@@ -6,6 +6,9 @@
 #include <dirent.h>
 #include <citro2d.h>
 
+/* ── TextBuf global ── */
+
+
 #define ROW_H  22
 #define LIST_Y 30
 
@@ -26,11 +29,12 @@ static void draw_rect(float x,float y,float w,float h,u32 c)
 
 static void draw_text(float x,float y,float sz,u32 c,const char *t)
 {
-    C2D_Text tx; C2D_TextBuf tb=C2D_TextBufNew(512);
-    C2D_TextParse(&tx,tb,t);
+    g_textbuf_init();
+    C2D_TextBufClear(g_textbuf);
+    C2D_Text tx;
+    C2D_TextParse(&tx,g_textbuf,t);
     C2D_TextOptimize(&tx);
     C2D_DrawText(&tx,C2D_AlignLeft|C2D_WithColor,x,y,0,sz,sz,c);
-    C2D_TextBufDelete(tb);
 }
 
 // ─── Init ─────────────────────────────────────────────────────
