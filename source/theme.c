@@ -6,6 +6,16 @@
 /* Buffer texte GLOBAL unique pour toute lapp */
 C2D_TextBuf g_textbuf = NULL;
 
+/* Convertir 0xRRGGBBFF -> RGBA8(r,g,b,a) format interne */
+static u32 parse_color(unsigned int hex)
+{
+    u8 r = (hex >> 24) & 0xFF;
+    u8 g = (hex >> 16) & 0xFF;
+    u8 b = (hex >>  8) & 0xFF;
+    u8 a = (hex >>  0) & 0xFF;
+    return RGBA8(r, g, b, a);
+}
+
 // ─── Dark theme (default) ─────────────────────────────────────
 Theme theme_dark = {
     .name          = "Dark",
@@ -35,7 +45,12 @@ Theme theme_dark = {
         RGB8(200, 220, 100),
     },
     .eq_bar   = RGB8(80, 160, 255),
-    .eq_handle= RGB8(255, 255, 255),
+    .eq_handle       = RGB8(255, 255, 255),
+    .eq_bar_selected = RGB8(255, 220, 80),
+    .eq_bar_positive = RGB8(80, 200, 120),
+    .eq_bar_negative = RGB8(255, 80, 80),
+    .eq_zero_line    = RGB8(100, 100, 130),
+    .eq_bg           = RGB8(10, 10, 18),
 };
 
 // ─── Light theme ──────────────────────────────────────────────
@@ -67,7 +82,12 @@ Theme theme_light = {
         RGB8(210, 210, 60),
     },
     .eq_bar   = RGB8(0,  120, 255),
-    .eq_handle= RGB8(30, 30, 60),
+    .eq_handle       = RGB8(30, 30, 60),
+    .eq_bar_selected = RGB8(255, 160, 0),
+    .eq_bar_positive = RGB8(0, 160, 80),
+    .eq_bar_negative = RGB8(200, 40, 40),
+    .eq_zero_line    = RGB8(140, 140, 160),
+    .eq_bg           = RGB8(210, 210, 225),
 };
 
 // ─── Purple Neon theme ────────────────────────────────────────
@@ -99,7 +119,12 @@ Theme theme_purple = {
         RGB8(255, 180, 100),
     },
     .eq_bar   = RGB8(180, 60, 255),
-    .eq_handle= RGB8(255, 200, 255),
+    .eq_handle       = RGB8(255, 200, 255),
+    .eq_bar_selected = RGB8(255, 255, 100),
+    .eq_bar_positive = RGB8(100, 255, 150),
+    .eq_bar_negative = RGB8(255, 60, 120),
+    .eq_zero_line    = RGB8(80, 40, 110),
+    .eq_bg           = RGB8(5, 2, 12),
 };
 
 // ─── Forest Green theme ───────────────────────────────────────
@@ -207,6 +232,8 @@ bool theme_load_from_file(const char *path, Theme *out)
     FILE *f = fopen(path, "r");
     if(!f) return false;
     char line[256];
+    bool vis_start_set = false;
+    bool vis_end_set   = false;
     while(fgets(line, sizeof(line), f)) {
         char *p=line; while(*p==' '||*p=='\t') p++;
         if(*p==';'||*p=='#'||*p=='\n'||*p=='\r'||*p==0) continue;
@@ -256,14 +283,45 @@ bool theme_load_from_file(const char *path, Theme *out)
             if(!strcmp(key,"scrollbar"))      out->scrollbar     = ival;
             if(!strcmp(key,"progress_bg"))    out->progress_bg   = ival;
             if(!strcmp(key,"progress_fill"))  out->progress_fill = ival;
-            if(!strcmp(key,"eq_bar"))         out->eq_bar        = ival;
-            if(!strcmp(key,"eq_handle"))      out->eq_handle     = ival;
+            if(!strcmp(key,"eq_bar"))             out->eq_bar          = ival;
+            if(!strcmp(key,"eq_handle"))          out->eq_handle       = ival;
+            if(!strcmp(key,"eq_bar_selected"))    out->eq_bar_selected = ival;
+            if(!strcmp(key,"eq_bar_positive"))    out->eq_bar_positive = ival;
+            if(!strcmp(key,"eq_bar_negative"))    out->eq_bar_negative = ival;
+            if(!strcmp(key,"eq_zero_line"))       out->eq_zero_line    = ival;
+            if(!strcmp(key,"eq_bg"))              out->eq_bg           = ival;
+
+            /* vis_start et vis_end pour degrade auto */
+            if(!strcmp(key,"vis_start")){ out->visualizer_bars[0]=ival; vis_start_set=true; }
+            if(!strcmp(key,"vis_end"))  { out->visualizer_bars[7]=ival; vis_end_set=true;   }
+
+            /* vis0..vis7 individuels */
+            for(int vi=0;vi<8;vi++){
+                char vk[8]; snprintf(vk,8,"vis%d",vi);
+                if(!strcmp(key,vk)){ out->visualizer_bars[vi]=ival; break; }
+            }
         }
 
         // ─── Lecture nom ──────────────────────────────────────
         if(!strcmp(key,"name"))
             snprintf(out->name, 64, "%s", val);
     }
+
+    /* Degrade automatique seulement si vis_start/vis_end definis */
+    if(vis_start_set && vis_end_set) {
+        u32 c0 = out->visualizer_bars[0];
+        u32 c7 = out->visualizer_bars[7];
+        int r0=(c0>>0)&0xff, g0=(c0>>8)&0xff, b0=(c0>>16)&0xff;
+        int r7=(c7>>0)&0xff, g7=(c7>>8)&0xff, b7=(c7>>16)&0xff;
+        for(int vi=1;vi<7;vi++){
+            float t=(float)vi/7.f;
+            int r=r0+(int)((r7-r0)*t);
+            int g=g0+(int)((g7-g0)*t);
+            int b=b0+(int)((b7-b0)*t);
+            out->visualizer_bars[vi]=RGBA8(r,g,b,255);
+        }
+    }
+
     fclose(f);
     return true;
 }
