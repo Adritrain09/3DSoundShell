@@ -55,27 +55,40 @@ void eq_draw_top(int selected_band)
                         : bar_y_base-bar_area_h/2.f + bar_area_h/2.f;
         if(bh<0) { by=bar_y_base-bar_area_h/2.f+bar_area_h/2.f; bh=-bh; }
 
-        u32 col=(i==selected_band)?th->eq_bar:
-                RGBA8(
-                    (th->eq_bar>>0)&0xff,
-                    (th->eq_bar>>8)&0xff,
-                    (th->eq_bar>>16)&0xff,
-                    160);
+        /* Couleur degradee selon theme */
+        u32 bar_col = th->visualizer_bars[i];
+        if(i != selected_band) {
+            u8 r=(bar_col>>0)&0xff;
+            u8 g2=(bar_col>>8)&0xff;
+            u8 b2=(bar_col>>16)&0xff;
+            bar_col = RGBA8(r*2/3, g2*2/3, b2*2/3, 200);
+        }
 
-        draw_rect(x,by,bar_w,bh<2?2:bh,col);
+        /* Barre principale */
+        draw_rect(x, by, bar_w, bh<2?2:bh, bar_col);
 
-        // Handle
+        /* Reflet */
+        if(bh > 2) {
+            u8 r=(bar_col>>0)&0xff;
+            u8 g2=(bar_col>>8)&0xff;
+            u8 b2=(bar_col>>16)&0xff;
+            draw_rect(x, by+bh, bar_w, bh*0.15f, RGBA8(r,g2,b2,60));
+        }
+
+        /* Handle selection */
         if(i==selected_band)
-            draw_rect(x-2,by-4,bar_w+4,8,th->eq_handle);
+            draw_rect(x-2, by-4, bar_w+4, 8, th->eq_handle);
 
-        // Label
-        draw_text(x+4,bar_y_base+bar_area_h/2.f+4,0.38f,
-            i==selected_band?th->text_accent:th->text_disabled,
+        /* Label frequence */
+        draw_text(x+2, bar_y_base+bar_area_h/2.f+4, 0.38f,
+            i==selected_band ? th->text_accent : th->text_disabled,
             band_labels[i]);
 
-        // dB value
+        /* Valeur dB */
         char db[8]; snprintf(db,8,"%.1f",audio_eq_get_gain(i));
-        draw_text(x+2,by-14,0.38f,th->text_secondary,db);
+        draw_text(x+2, by-14, 0.38f,
+            i==selected_band ? th->text_accent : th->text_secondary,
+            db);
     }
 }
 

@@ -72,7 +72,7 @@ static void load_and_play(const char *path)
     strncpy(g_settings.last_path, path, 511);
     g_settings.last_track    = g_playlist.current;
     g_settings.last_position = 0;
-    settings_save_sync(); /* Critique: doit etre sauve maintenant */
+    settings_save(); /* Async: pas de freeze */
     
     g_state = STATE_PLAYER;
 }
@@ -342,17 +342,42 @@ static void init_thread_func(void *arg)
         strncpy(resume_dir, g_settings.last_path, 511);
         char *sl = strrchr(resume_dir, '/');
         if (sl) *sl = '\0';
+
+        /* Desactiver shuffle pendant le chargement */
+        bool saved_shuffle = g_playlist.shuffle;
+        g_playlist.shuffle = false;
+
         pl_add_dir(&g_playlist, resume_dir);
+
+        dbg("init: pl_add_dir done");
+        {
+            FILE *f = fopen("sdmc:/3DSoundShell/debug.log","a");
+            if(f) {
+                fprintf(f, "init: count=%d looking for: %s\n",
+                    g_playlist.count, g_settings.last_path);
+                for(int i=0;i<g_playlist.count && i<5;i++)
+                    fprintf(f, "  [%d] %s\n", i, g_playlist.items[i].path);
+                fclose(f);
+            }
+        }
+
         int found = 0;
         for (int i = 0; i < g_playlist.count; i++) {
             if (!strcmp(g_playlist.items[i].path, g_settings.last_path)) {
                 pl_jump(&g_playlist, i);
                 found = 1;
+                dbg("init: track found!");
                 break;
             }
         }
-        if (!found && g_playlist.count > 0)
-            pl_jump(&g_playlist, 0);
+        if (!found) {
+            dbg("init: track NOT found, jumping to 0");
+            if (g_playlist.count > 0) pl_jump(&g_playlist, 0);
+        }
+
+        /* Restaurer shuffle */
+        g_playlist.shuffle = saved_shuffle;
+        if (saved_shuffle) pl_rebuild_shuffle(&g_playlist);
     }
 
     g_init_done = true;

@@ -210,11 +210,12 @@ void player_ui_update(PlayerUI *ui, const AudioMetadata *meta, float dt)
     /* Scroll titre long */
     if (meta && strlen(meta->title) > 30) {
         ui->scroll_title_x -= 0.8f;
-        float title_w = strlen(meta->title) * 8.0f * 0.55f;
-        if (ui->scroll_title_x < -(title_w))
-            ui->scroll_title_x = TOP_WIDTH;
+        float title_w = strlen(meta->title) * 8.0f * 0.52f;
+        /* Loop: quand le titre est sorti a gauche, recommencer */
+        if (ui->scroll_title_x < -(title_w + 30))
+            ui->scroll_title_x = 100.f;
     } else {
-        ui->scroll_title_x = 0;
+        ui->scroll_title_x = 100.f; /* position fixe */
     }
 
     (void)dt;
@@ -356,10 +357,16 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
     float info_x = 100;
 
     /* Titre (scroll si long) */
-    float title_len = strlen(meta->title) * 8.f * 0.55f;
-    float tx = (title_len > 290.f && ui->scroll_title_x != 0)
-               ? ui->scroll_title_x : info_x;
-    draw_text(tx, 34, 0.55f, th->text_primary, meta->title);
+    float title_len = strlen(meta->title) * 8.f * 0.52f;
+    if (title_len > 290.f) {
+        /* Titre long: scroll */
+        draw_text(ui->scroll_title_x, 34, 0.52f, th->text_primary, meta->title);
+        /* Double pour effet loop */
+        draw_text(ui->scroll_title_x + title_len + 30, 34, 0.52f, th->text_primary, meta->title);
+    } else {
+        /* Titre court: fixe */
+        draw_text(info_x, 34, 0.52f, th->text_primary, meta->title);
+    }
 
     draw_text(info_x, 56, 0.46f, th->text_secondary, meta->artist);
     draw_text(info_x, 72, 0.44f, th->text_disabled,  meta->album);
@@ -396,10 +403,14 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
     draw_text(pb_x+pb_w-30,   pb_y+11, 0.44f, th->text_secondary, t_tot);
 
     /* Volume */
-    draw_text(pb_x, pb_y+26, 0.42f, th->text_disabled, "Vol");
     float vol = audio_get_volume();
-    draw_rect(pb_x+28, pb_y+28, 100,     5, th->progress_bg);
-    draw_rect(pb_x+28, pb_y+28, 100*vol, 5, th->accent2);
+    draw_text(pb_x, pb_y+24, 0.40f, th->text_disabled, "VOL");
+    draw_rect(pb_x+26, pb_y+26, 120,     5, th->progress_bg);
+    draw_rect(pb_x+26, pb_y+26, 120*vol, 5, th->accent2);
+    /* Pourcentage volume */
+    char vol_str[8];
+    snprintf(vol_str, 8, "%d%%", (int)(vol*100));
+    draw_text(pb_x+150, pb_y+24, 0.40f, th->text_disabled, vol_str);
 
     /* ── Visualiseur ───────────────────────────────────────── */
     float vx=8, vy=165, vw=384, vh=58;

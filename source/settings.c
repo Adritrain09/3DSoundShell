@@ -98,8 +98,18 @@ void settings_load(void)
         if (sscanf(line,"repeat=%d",  &ival)==1) { g_settings.repeat=ival;             continue; }
         if (sscanf(line,"show_cover=%d",&ival)==1){ g_settings.show_cover=ival;        continue; }
         if (sscanf(line,"resume=%d",  &ival)==1) { g_settings.resume_on_start=ival;    continue; }
-        if (sscanf(line,"start_dir=%511s",sval)==1){ strncpy(g_settings.start_dir,sval,511); continue; }
-        if (sscanf(line,"last_path=%511s",sval)==1){ strncpy(g_settings.last_path,sval,511); continue; }
+        if(strncmp(line,"start_dir=",10)==0) {
+            strncpy(g_settings.start_dir, line+10, 511);
+            g_settings.start_dir[511]=0;
+            char *nl=strchr(g_settings.start_dir,'\n'); if(nl)*nl=0;
+            nl=strchr(g_settings.start_dir,'\r'); if(nl)*nl=0;
+            continue; }
+        if(strncmp(line,"last_path=",10)==0) {
+            strncpy(g_settings.last_path, line+10, 511);
+            g_settings.last_path[511]=0;
+            char *nl=strchr(g_settings.last_path,'\n'); if(nl)*nl=0;
+            nl=strchr(g_settings.last_path,'\r'); if(nl)*nl=0;
+            continue; }
         if (sscanf(line,"last_track=%d",&ival)==1){ g_settings.last_track=ival;        continue; }
         if (sscanf(line,"eq_preset=%d",&ival)==1) { g_settings.eq_preset_index=ival;   continue; }
         for (int i = 0; i < 8; i++) {
