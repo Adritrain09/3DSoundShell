@@ -44,14 +44,24 @@ extern Theme theme_dark;
 extern Theme theme_light;
 extern Theme theme_purple;
 extern Theme theme_forest;
+extern Theme theme_custom;
+extern bool theme_custom_loaded;
 
 // ─── Active theme ─────────────────────────────────────────────
 extern Theme *current_theme;
+
+/* Buffer texte global */
+#include <citro2d.h>
+extern C2D_TextBuf g_textbuf;
+void g_textbuf_init(void);
+void g_textbuf_exit(void);
 
 void theme_init(void);
 void theme_set(Theme *t);
 bool theme_load_from_file(const char *path, Theme *out);
 void theme_save_to_file(const char *path, const Theme *t);
+bool theme_load_custom(void);
+bool theme_has_custom(void);
 int  theme_count(void);
 Theme *theme_get(int index);
 const char *theme_name(int index);

@@ -20,6 +20,7 @@ typedef enum {
 // ─── Metadata ─────────────────────────────────────────────────
 typedef struct {
     char title[256];
+    char format[8];
     char artist[256];
     char album[256];
     char genre[64];

@@ -35,6 +35,7 @@ extern Settings g_settings;
 void settings_init(void);
 void settings_load(void);
 void settings_save(void);
+void settings_save_sync(void); /* save garanti avant quitter */
 void settings_draw_top(void);
 void settings_draw_bottom(int *selected_item);
 void settings_handle_input(int *selected_item, u32 keys_down);
