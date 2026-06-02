@@ -1,144 +1,136 @@
-#---------------------------------------------------------------------------------
-# 3DSoundShell — Makefile pour devkitARM
-# Requiert devkitPro avec 3ds-dev, citro2d, citro3d
-#---------------------------------------------------------------------------------
+.SUFFIXES:
 
-APP_TITLE    := 3DSoundShell
-APP_DESCRIPTION := Lecteur de musique 3DS
-APP_AUTHOR   := 3DSoundShell
-APP_PRODUCT_CODE := CTR-P-TDSS
-APP_UNIQUE_ID := 0xFF3D5
+ifeq ($(strip $(DEVKITARM)),)
+$(error "Please set DEVKITARM in your environment.")
+endif
 
-TARGET       := 3DSoundShell
-BUILD        := build
-SOURCES      := source
-INCLUDES     := include
-ROMFS        := romfs
-GFXBUILD     := $(BUILD)/gfx
-
-#---------------------------------------------------------------------------------
-# options for code generation
-#---------------------------------------------------------------------------------
-ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-
-CFLAGS   := -g -Wall -O2 -mword-relocations \
-            -fomit-frame-pointer -ffunction-sections \
-            $(ARCH) $(INCLUDE) -D__3DS__ -I/opt/devkitpro/portlibs/3ds/include/opus
-
-CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
-
-ASFLAGS  := -g $(ARCH)
-
-LDFLAGS  := -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
-
-#---------------------------------------------------------------------------------
-# Libraries
-#  Order matters for static linking
-#---------------------------------------------------------------------------------
-LIBS     := -lopusfile -lopus -logg \
-            -lmpg123 \
-            -lvorbisidec \
-            -lFLAC \
-            -lcitro2d -lcitro3d \
-            -lctru \
-            -lm
-
-LIBDIRS  := /opt/devkitpro/libctru /opt/devkitpro/portlibs/3ds
-
-#---------------------------------------------------------------------------------
-# Include devkitARM rules
-#---------------------------------------------------------------------------------
+TOPDIR ?= $(CURDIR)
 include $(DEVKITARM)/3ds_rules
 
-#---------------------------------------------------------------------------------
-# Targets
-#---------------------------------------------------------------------------------
-.PHONY: all clean 3dsx cia
+TARGET    := 3DSoundShell
+BUILD     := build
+SOURCES   := source
+DATA      := data
+INCLUDES  := include source
+ROMFS     := romfs
 
-all: $(TARGET).3dsx $(TARGET).cia
+ARCH      := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-3dsx: $(TARGET).3dsx
+CFLAGS    := -g -Wall -Wno-unused-function -O2 -mword-relocations -ffunction-sections $(ARCH)
+CFLAGS    += $(INCLUDE) -D__3DS__ -I$(DEVKITPRO)/portlibs/3ds/include/opus
+CXXFLAGS  := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++14
+ASFLAGS   := -g $(ARCH)
+LDFLAGS    = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-#---------------------------------------------------------------------------------
-# Build rules
-#---------------------------------------------------------------------------------
-$(TARGET).3dsx: $(TARGET).elf
-	3dsxtool $< $@ --romfs=$(ROMFS) --smdh=$(TARGET).smdh
+LIBS      := -lopusfile -lopus -logg -lmpg123 -lcitro2d -lcitro3d -lctru -lm
 
-$(TARGET).smdh: $(APP_TITLE).png
-	bannertool/windows-x86_64/bannertool.exe makesmdh -s "$(APP_TITLE)" \
-	    -l "$(APP_DESCRIPTION)" \
-	    -p "$(APP_AUTHOR)" \
-	    -i romfs/gfx/icon.png \
-	    -o $@
+LIBDIRS   := $(CTRULIB) $(PORTLIBS) $(DEVKITPRO)/portlibs/3ds
 
-$(TARGET).elf:
-	$(MAKE) --no-print-directory -C $(BUILD) \
-	    -f $(CURDIR)/Makefile.inner \
-	    TARGET=$(CURDIR)/$(TARGET) \
-	    SOURCES=$(CURDIR)/$(SOURCES) \
-	    INCLUDES=$(CURDIR)/$(INCLUDES) \
-	    ROMFS=$(CURDIR)/$(ROMFS) \
-	    CFLAGS="$(CFLAGS)" \
-	    LDFLAGS="$(LDFLAGS)" \
-	    LIBS="$(LIBS)" \
-	    LIBDIRS="$(LIBDIRS)"
+ifneq ($(BUILD),$(notdir $(CURDIR)))
 
-#---------------------------------------------------------------------------------
-# CIA target (requires makerom + bannertool)
-#---------------------------------------------------------------------------------
-cia: $(TARGET).cia
+export OUTPUT  := $(CURDIR)/$(TARGET)
+export TOPDIR  := $(CURDIR)
 
-$(TARGET).cia: $(TARGET).3dsx $(TARGET).smdh
-	@echo "Génération de la bannière..."
-	bannertool/windows-x86_64/bannertool.exe makebanner \
-	    -i romfs/gfx/banner.png \
-	    -a romfs/audio/silence.wav \
-	    -o banner.bin
+export VPATH   := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
+                  $(foreach dir,$(DATA),$(CURDIR)/$(dir))
 
-	@echo "Génération de l'icône SMDH..."
-	bannertool/windows-x86_64/bannertool.exe makesmdh \
-	    -s "$(APP_TITLE)" \
-	    -l "$(APP_DESCRIPTION)" \
-	    -p "$(APP_AUTHOR)" \
-	    -i romfs/gfx/icon.png \
-	    -o icon.icn
+export DEPSDIR := $(CURDIR)/$(BUILD)
 
-	@echo "Création du .cia avec makerom..."
-	makerom -f cia \
-	    -target t \
-	    -exefslogo \
-	    -elf $(TARGET).elf \
-	    -rsf cia.rsf \
-	    -banner banner.bin \
-	    -icon icon.icn \
-	    \
-	    -o $(TARGET).cia
-
-	@echo ""
-	@echo "✅  $(TARGET).cia généré avec succès!"
-	@echo "   → Copiez-le sur votre carte SD et installez avec FBI"
-
-clean:
-	@echo "Nettoyage..."
-	@rm -rf $(BUILD) $(TARGET).3dsx $(TARGET).elf $(TARGET).smdh $(TARGET).cia
-	@rm -f banner.bin icon.icn
-
-#---------------------------------------------------------------------------------
-# Inner build rules (used inside build/ directory)
-#---------------------------------------------------------------------------------
 CFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-OFILES   := $(CFILES:.c=.o) $(CPPFILES:.cpp=.o)
+SFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+BINFILES := $(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
 
-INCLUDE  := $(foreach dir,$(INCLUDES),-I$(dir)) \
-            $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-            -I$(BUILD)
+ifeq ($(strip $(CPPFILES)),)
+export LD := $(CC)
+else
+export LD := $(CXX)
+endif
 
-LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export OFILES_SOURCES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+export OFILES_BIN     := $(addsuffix .o,$(BINFILES))
+export OFILES         := $(OFILES_BIN) $(OFILES_SOURCES)
+export HFILES         := $(addsuffix .h,$(subst .,_,$(BINFILES)))
 
-$(TARGET).elf: $(OFILES)
-	$(CC) $(LDFLAGS) $(OFILES) $(LIBPATHS) $(LIBS) -o $@
+export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+                   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+                   -I$(CURDIR)/$(BUILD)
 
-%.o: $(SOURCES)/%.c
-	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
+export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+
+export _3DSXDEPS := $(if $(NO_SMDH),,$(OUTPUT).smdh)
+
+ifeq ($(strip $(ICON)),)
+icons := $(wildcard *.png)
+ifneq (,$(findstring $(TARGET).png,$(icons)))
+export APP_ICON := $(TOPDIR)/$(TARGET).png
+else
+ifneq (,$(findstring icon.png,$(icons)))
+export APP_ICON := $(TOPDIR)/icon.png
+endif
+endif
+else
+export APP_ICON := $(TOPDIR)/$(ICON)
+endif
+
+ifeq ($(strip $(NO_SMDH)),)
+export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
+endif
+
+ifneq ($(ROMFS),)
+export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
+endif
+
+.PHONY: all clean cia
+
+all: $(BUILD) $(DEPSDIR)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+$(BUILD):
+	@mkdir -p $@
+
+$(DEPSDIR):
+	@mkdir -p $@
+
+clean:
+	@echo clean ...
+	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(TARGET).cia *.map *.bin
+
+cia: all
+	@echo Building CIA...
+	@bannertool makesmdh \
+		-s "3DSoundShell" \
+		-l "3DSoundShell - Music Player" \
+		-p "Adritrain09" \
+		-i $(TOPDIR)/$(TARGET).png \
+		-o $(TOPDIR)/$(TARGET).smdh
+	@makerom -f cia \
+		-target t \
+		-exefslogo \
+		-o $(TOPDIR)/$(TARGET).cia \
+		-elf $(TOPDIR)/$(TARGET).elf \
+		-rsf $(TOPDIR)/cia.rsf \
+		-icon $(TOPDIR)/$(TARGET).smdh \
+		-DROMFS_DIR=$(TOPDIR)/$(ROMFS)
+	@echo CIA done!
+
+else
+
+DEPENDS := $(OFILES:.o=.d)
+
+$(OUTPUT).3dsx: $(OUTPUT).elf $(_3DSXDEPS)
+
+$(OFILES_SOURCES): $(HFILES)
+
+$(OUTPUT).elf: $(OFILES)
+	@echo linking $(notdir $@)
+	@$(LD) $(LDFLAGS) $(OFILES) $(LIBPATHS) $(LIBS) -o $@
+	@$(NM) -CSn $@ > $(notdir $*.map)
+
+%.bin.o %_bin.h: %.bin
+	@echo $(notdir $<)
+	@$(bin2o)
+
+-include $(DEPSDIR)/*.d
+
+endif
