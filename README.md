@@ -1,8 +1,8 @@
 # 🎵 3DSoundShell
 
-Ceci est un lecteur de music pour la 2/3DS inspiré de **3DShell** et de **CTRMUS**, fait avec [claude ai](claude.ai/new) et [Arena](arena.ai). Le lecteur est toujours en test et n'auras pas de version réellement fini, mais j'y travail encore malgré les limites de messages imposé par les sites (et le tout se qui est écrit dans le README est se qu'il devait y avoir a la fin). Les test sont effectué avec une *New 2DS XL* et une *3DS classique*.
+Ceci est un lecteur de music pour la 2/3DS inspiré de **3DShell** et de **CTRMUS**, fait avec [claude ai](claude.ai/new) et [Arena](arena.ai). Le lecteur est toujours en test et n'auras pas de version réellement fini, mais j'y travail encore malgré les limites de messages imposé par les sites (et tout se qui est écrit dans le README est tout se qu'il devrait y avoir a la fin de l'app avec des ajouts en plus). Les test sont effectué avec une *New 2DS XL* et une *3DS classique* et maintenant une *2DS classique*!! pour et esur que l'IA ne fasse pas de bétise.
 
-README généré par claude.ai et modifié par moi:
+README généré par claude.ai et modifié par.. bas.. moi:
 ---
 
 ## ✨ Fonctionnalités
