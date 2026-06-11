@@ -32,7 +32,8 @@ static AudioState        s_state       = AUDIO_STOPPED;
 static float             s_volume      = 0.8f;
 static AudioFormat       s_fmt         = FMT_UNKNOWN;
 static AudioMetadata     s_meta;
-static float             s_viz[EQ_BANDS] = {0};
+static float             s_viz[EQ_BANDS]     = {0};
+static float             s_viz_fft[EQ_BANDS] = {0};
 
 static ndspWaveBuf       s_wbufs[NUM_BUFS];
 static s16              *s_pcm_buf    = NULL;
@@ -40,6 +41,9 @@ static int               s_buf_idx    = 0;
 
 static Thread            s_thread     = NULL;
 static volatile bool     s_thread_run = false;
+static volatile bool     s_seek_requested = false;
+static volatile u64      s_seek_target    = 0;
+static void do_seek(void); /* forward declaration */
 
 static u64               s_samples_played = 0;
 static u32               s_sample_rate    = SAMPLE_RATE;
@@ -275,23 +279,187 @@ static int decode_chunk(s16 *out, int max_pairs)
     }
 }
 
-/* ── Visualizer ─────────────────────────────────────────────── */
+/* ── EQ Biquad ──────────────────────────────────────────────── */
+static float s_eq_gains[EQ_BANDS] = {0};
+
+static const float EQ_FREQS[EQ_BANDS] = {
+    32.f, 64.f, 125.f, 250.f, 500.f, 1000.f, 2000.f, 8000.f
+};
+
+typedef struct {
+    float b0, b1, b2, a1, a2;
+    float x1L, x2L, y1L, y2L;
+    float x1R, x2R, y1R, y2R;
+} BiquadFilter;
+
+static BiquadFilter s_filters[EQ_BANDS];
+static float        s_last_gains[EQ_BANDS] = {0};
+
+static void biquad_compute(BiquadFilter *f, float freq, float gain_db, float sr)
+{
+    if (sr <= 0.f) sr = 44100.f;
+    float A  = powf(10.f, gain_db / 40.f);
+    float w0 = 2.f * M_PI * freq / sr;
+    float Q;
+    if      (freq <   100.f) Q = 0.8f;
+    else if (freq <   300.f) Q = 1.0f;
+    else if (freq <  1000.f) Q = 1.2f;
+    else if (freq <  4000.f) Q = 1.5f;
+    else                     Q = 2.0f;
+    float alpha = sinf(w0) / (2.f * Q);
+    float b0 =  1.f + alpha * A;
+    float b1 = -2.f * cosf(w0);
+    float b2 =  1.f - alpha * A;
+    float a0 =  1.f + alpha / A;
+    float a1 = -2.f * cosf(w0);
+    float a2 =  1.f - alpha / A;
+    f->b0 = b0/a0; f->b1 = b1/a0; f->b2 = b2/a0;
+    f->a1 = a1/a0; f->a2 = a2/a0;
+}
+
+static void eq_update_filters(float sr)
+{
+    for (int b = 0; b < EQ_BANDS; b++) {
+        if (s_eq_gains[b] != s_last_gains[b]) {
+            biquad_compute(&s_filters[b], EQ_FREQS[b], s_eq_gains[b], sr);
+            s_filters[b].x1L = s_filters[b].x2L = 0.f;
+            s_filters[b].y1L = s_filters[b].y2L = 0.f;
+            s_filters[b].x1R = s_filters[b].x2R = 0.f;
+            s_filters[b].y1R = s_filters[b].y2R = 0.f;
+            s_last_gains[b] = s_eq_gains[b];
+        }
+    }
+}
+
+static void apply_eq(s16 *buf, int pairs)
+{
+    bool eq_active = false;
+    for (int b = 0; b < EQ_BANDS; b++)
+        if (s_eq_gains[b] != 0.f) { eq_active = true; break; }
+    if (!eq_active) return;
+    eq_update_filters((float)s_sample_rate);
+    for (int b = 0; b < EQ_BANDS; b++) {
+        if (s_eq_gains[b] == 0.f) continue;
+        BiquadFilter *f = &s_filters[b];
+        for (int i = 0; i < pairs; i++) {
+            float xL = (float)buf[i*2];
+            float yL = f->b0*xL + f->b1*f->x1L + f->b2*f->x2L
+                                 - f->a1*f->y1L - f->a2*f->y2L;
+            f->x2L = f->x1L; f->x1L = xL;
+            f->y2L = f->y1L; f->y1L = yL;
+            buf[i*2] = (s16)(yL > 32767.f ? 32767.f : (yL < -32768.f ? -32768.f : yL));
+            float xR = (float)buf[i*2+1];
+            float yR = f->b0*xR + f->b1*f->x1R + f->b2*f->x2R
+                                 - f->a1*f->y1R - f->a2*f->y2R;
+            f->x2R = f->x1R; f->x1R = xR;
+            f->y2R = f->y1R; f->y1R = yR;
+            buf[i*2+1] = (s16)(yR > 32767.f ? 32767.f : (yR < -32768.f ? -32768.f : yR));
+        }
+    }
+}
+
+/* ── FFT Visualiseur ────────────────────────────────────────── */
+#define FFT_SIZE 512
+
+static float s_fft_re[FFT_SIZE];
+static float s_fft_im[FFT_SIZE];
+static float s_hann[FFT_SIZE];
+static bool  s_hann_init = false;
+
+static void fft_init_hann(void)
+{
+    for (int i = 0; i < FFT_SIZE; i++)
+        s_hann[i] = 0.5f * (1.f - cosf(2.f * M_PI * i / (FFT_SIZE - 1)));
+    s_hann_init = true;
+}
+
+static void fft_compute(float *re, float *im, int n)
+{
+    for (int i = 1, j = 0; i < n; i++) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            float tr = re[i]; re[i] = re[j]; re[j] = tr;
+            float ti = im[i]; im[i] = im[j]; im[j] = ti;
+        }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        float ang = -2.f * M_PI / len;
+        float wr = cosf(ang), wi = sinf(ang);
+        for (int i = 0; i < n; i += len) {
+            float cr = 1.f, ci = 0.f;
+            for (int j = 0; j < len/2; j++) {
+                float ur = re[i+j], ui = im[i+j];
+                float vr = re[i+j+len/2]*cr - im[i+j+len/2]*ci;
+                float vi = re[i+j+len/2]*ci + im[i+j+len/2]*cr;
+                re[i+j]       = ur + vr; im[i+j]       = ui + vi;
+                re[i+j+len/2] = ur - vr; im[i+j+len/2] = ui - vi;
+                float ncr = cr*wr - ci*wi;
+                ci = cr*wi + ci*wr; cr = ncr;
+            }
+        }
+    }
+}
+
 static void update_viz(const s16 *buf, int pairs)
 {
-    int bs = pairs / EQ_BANDS;
-    if (bs < 1) bs = 1;
+    if (!s_hann_init) fft_init_hann();
+    int n = pairs < FFT_SIZE ? pairs : FFT_SIZE;
+
+    /* FFT pour VIZ_EQ */
+    for (int i = 0; i < n; i++) {
+        float l = buf[i*2]   / 32767.f;
+        float r = buf[i*2+1] / 32767.f;
+        s_fft_re[i] = ((l + r) * 0.5f) * s_hann[i];
+        s_fft_im[i] = 0.f;
+    }
+    for (int i = n; i < FFT_SIZE; i++) { s_fft_re[i] = 0.f; s_fft_im[i] = 0.f; }
+    fft_compute(s_fft_re, s_fft_im, FFT_SIZE);
+
+    /* Bandes: limites en Hz recalculees correctement
+       bin = freq * FFT_SIZE / sample_rate
+       sr=44100, FFT=512: 1bin = 86Hz
+       Limites: 0 45 90 180 375 750 3500 8000 11025 Hz */
+    static const int BSTART[EQ_BANDS] = { 0,  0,  1,  2,  4,  8, 40, 92};
+    static const int BEND  [EQ_BANDS] = { 0,  1,  2,  4,  8, 40, 92,127};
+
+    /* Boost par bande pour equilibrer (les aigus ont plus de bins = energie diluee) */
+    static const float BOOST[EQ_BANDS] = {1.3f, 1.2f, 1.5f, 1.6f, 1.5f, 4.f, 6.6f, 9.3f};
+
     for (int b = 0; b < EQ_BANDS; b++) {
-        float energy = 0;
-        int start = b * bs;
-        int end   = start + bs;
-        if (end > pairs) end = pairs;
-        for (int i = start; i < end; i++) {
-            float s = buf[i*2] / 32767.f;
-            energy += s * s;
+        int bs = BSTART[b], be = BEND[b];
+        if (be >= FFT_SIZE/2) be = FFT_SIZE/2 - 1;
+        if (be <= bs) be = bs + 1;
+        float energy = 0.f; int count = 0;
+        for (int k = bs; k <= be; k++) {
+            float mag = s_fft_re[k]*s_fft_re[k] + s_fft_im[k]*s_fft_im[k];
+            energy += sqrtf(mag); count++;
         }
-        energy = sqrtf(energy / bs);
-        float spd = (energy > s_viz[b]) ? 0.4f : 0.06f;
-        s_viz[b] += (energy - s_viz[b]) * spd;
+        if (count > 0) energy /= count;
+        energy /= (FFT_SIZE * 0.5f);
+        energy *= BOOST[b];
+        if (energy > 0.f)
+            energy = logf(1.f + energy * 300.f) / logf(301.f);
+        if (energy > 1.f) energy = 1.f;
+        float spd = (energy > s_viz_fft[b]) ? 0.6f : 0.04f;
+        s_viz_fft[b] += (energy - s_viz_fft[b]) * spd;
+    }
+
+    /* RMS pour Barres/Onde/Cercle */
+    int bs2 = n / EQ_BANDS;
+    if (bs2 < 1) bs2 = 1;
+    for (int b = 0; b < EQ_BANDS; b++) {
+        float rms = 0.f;
+        int s2 = b * bs2, e2 = s2 + bs2;
+        if (e2 > n) e2 = n;
+        for (int i = s2; i < e2; i++) {
+            float l = buf[i*2] / 32767.f, r = buf[i*2+1] / 32767.f;
+            float m = (l + r) * 0.5f; rms += m * m;
+        }
+        rms = sqrtf(rms / (e2 - s2));
+        float spd = (rms > s_viz[b]) ? 0.4f : 0.06f;
+        s_viz[b] += (rms - s_viz[b]) * spd;
     }
 }
 
@@ -301,37 +469,26 @@ static bool      s_lock_ready = false;
 
 static void audio_lock_init(void)
 {
-    if (!s_lock_ready) {
-        LightLock_Init(&s_audio_lock);
-        s_lock_ready = true;
-    }
+    if (!s_lock_ready) { LightLock_Init(&s_audio_lock); s_lock_ready = true; }
 }
 
 static void audio_thread(void *arg)
 {
     (void)arg;
     while (s_thread_run) {
-        if (s_state != AUDIO_PLAYING) {
-            svcSleepThread(16000000LL);
-            continue;
-        }
+        if (s_state != AUDIO_PLAYING) { svcSleepThread(16000000LL); continue; }
         ndspWaveBuf *wb = &s_wbufs[s_buf_idx];
         if (wb->status == NDSP_WBUF_QUEUED || wb->status == NDSP_WBUF_PLAYING) {
-            svcSleepThread(8000000LL);
-            continue;
+            svcSleepThread(8000000LL); continue;
         }
-
-        /* Lock pendant le decode */
+        if (s_seek_requested) do_seek();
         LightLock_Lock(&s_audio_lock);
         s16 *pcm   = s_pcm_buf + s_buf_idx * SAMPLES_PER_BUF * CHANNELS;
         int  pairs = decode_chunk(pcm, SAMPLES_PER_BUF);
         LightLock_Unlock(&s_audio_lock);
-
-        if (pairs <= 0) {
-            s_state = AUDIO_STOPPED;
-            continue;
-        }
+        if (pairs <= 0) { s_state = AUDIO_STOPPED; continue; }
         s_samples_played += pairs;
+        apply_eq(pcm, pairs);
         update_viz(pcm, pairs);
         if (s_volume != 1.0f) {
             for (int i = 0; i < pairs * CHANNELS; i++) {
@@ -353,64 +510,44 @@ Result audio_init(void)
 {
     audio_lock_init();
     Result rc = ndspInit();
-    if (R_FAILED(rc)) {
-        if (rc != (Result)0xD880A7FA) return rc;
-    }
-
+    if (R_FAILED(rc)) { if (rc != (Result)0xD880A7FA) return rc; }
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     ndspChnReset(NDSP_CHANNEL);
     ndspChnSetInterp(NDSP_CHANNEL, NDSP_INTERP_LINEAR);
     ndspChnSetRate(NDSP_CHANNEL, (float)SAMPLE_RATE);
     ndspChnSetFormat(NDSP_CHANNEL, NDSP_FORMAT_STEREO_PCM16);
     set_mix(s_volume);
-
     size_t sz = NUM_BUFS * SAMPLES_PER_BUF * CHANNELS * BYTES_PER_SAMPLE;
     s_pcm_buf = (s16*)linearAlloc(sz);
     if (!s_pcm_buf) { ndspExit(); return (Result)-1; }
     memset(s_pcm_buf, 0, sz);
     memset(s_wbufs,   0, sizeof(s_wbufs));
-
     mpg123_init();
     memset(&s_meta, 0, sizeof(s_meta));
     strncpy(s_meta.title,  "Aucune piste",    sizeof(s_meta.title)-1);
     strncpy(s_meta.artist, "Artiste inconnu", sizeof(s_meta.artist)-1);
-
     s_thread_run = true;
     s_thread = threadCreate(audio_thread, NULL, 32*1024, 0x18, -1, false);
     if (!s_thread) {
-        s_thread_run = false;
-        free_cover();
-        linearFree(s_pcm_buf);
-        s_pcm_buf = NULL;
-        mpg123_exit();
-        ndspExit();
-        return (Result)-2;
+        s_thread_run = false; free_cover();
+        linearFree(s_pcm_buf); s_pcm_buf = NULL;
+        mpg123_exit(); ndspExit(); return (Result)-2;
     }
     return 0;
 }
 
 void audio_exit(void)
 {
-    s_thread_run = false;
-    s_state      = AUDIO_STOPPED;
-
+    s_thread_run = false; s_state = AUDIO_STOPPED;
     svcSleepThread(50000000ULL);
     ndspChnWaveBufClear(NDSP_CHANNEL);
-
-    if (s_thread) {
-        threadJoin(s_thread, U64_MAX);
-        threadFree(s_thread);
-        s_thread = NULL;
-    }
-
+    if (s_thread) { threadJoin(s_thread, U64_MAX); threadFree(s_thread); s_thread = NULL; }
     if (s_vorbis)   { stb_vorbis_close(s_vorbis); s_vorbis   = NULL; }
     if (s_flac)     { drflac_close(s_flac);        s_flac     = NULL; }
     if (s_wav_open) { drwav_uninit(&s_wav);         s_wav_open = false; }
     if (s_mpg)      { mpg123_close(s_mpg); mpg123_delete(s_mpg); s_mpg = NULL; }
     if (s_opus)     { op_free(s_opus);              s_opus     = NULL; }
-
-    free_cover();
-    mpg123_exit();
+    free_cover(); mpg123_exit();
     if (s_pcm_buf) { linearFree(s_pcm_buf); s_pcm_buf = NULL; }
     ndspExit();
 }
@@ -418,7 +555,6 @@ void audio_exit(void)
 Result audio_load(const char *path)
 {
     audio_lock_init();
-    /* Log timestamp */
     { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
       if(_f){fprintf(_f,"audio_load START: %s\n",path);fclose(_f);} }
     LightLock_Lock(&s_audio_lock);
@@ -427,31 +563,22 @@ Result audio_load(const char *path)
       if(_f){fprintf(_f,"audio_load: apres stop\n");fclose(_f);} }
     memset(&s_meta, 0, sizeof(s_meta));
     meta_from_filename(path);
-
     s_fmt = detect_fmt(path);
     if (s_fmt == FMT_UNKNOWN) return (Result)-1;
-
     {
         const char *_e = strrchr(path, '.');
         if (_e) {
-            strncpy(s_meta.format, _e+1, 7);
-            s_meta.format[7] = 0;
+            strncpy(s_meta.format, _e+1, 7); s_meta.format[7] = 0;
             for (int i = 0; s_meta.format[i]; i++)
                 if (s_meta.format[i] >= 'a' && s_meta.format[i] <= 'z')
                     s_meta.format[i] -= 32;
-        } else {
-            strcpy(s_meta.format, "???");
-        }
+        } else strcpy(s_meta.format, "???");
     }
-
-    s_samples_played = 0;
-    s_buf_idx        = 0;
-
+    s_samples_played = 0; s_buf_idx = 0;
     ndspChnReset(NDSP_CHANNEL);
     ndspChnSetInterp(NDSP_CHANNEL, NDSP_INTERP_LINEAR);
     ndspChnSetFormat(NDSP_CHANNEL, NDSP_FORMAT_STEREO_PCM16);
     set_mix(s_volume);
-
     switch (s_fmt) {
         case FMT_OGG: {
             int err = 0;
@@ -461,8 +588,7 @@ Result audio_load(const char *path)
             ndspChnSetRate(NDSP_CHANNEL, (float)s_vinfo.sample_rate);
             s_sample_rate = s_vinfo.sample_rate;
             int total = stb_vorbis_stream_length_in_samples(s_vorbis);
-            if (s_vinfo.sample_rate > 0)
-                s_meta.duration_sec = total / s_vinfo.sample_rate;
+            if (s_vinfo.sample_rate > 0) s_meta.duration_sec = total / s_vinfo.sample_rate;
             stb_vorbis_comment c = stb_vorbis_get_comment(s_vorbis);
             for (int i = 0; i < c.comment_list_length; i++) {
                 char *kv = c.comment_list[i];
@@ -477,8 +603,7 @@ Result audio_load(const char *path)
         }
         case FMT_WAV: {
             if (!drwav_init_file(&s_wav, path, NULL)) return (Result)-1;
-            s_wav_open    = true;
-            s_sample_rate = s_wav.sampleRate;
+            s_wav_open = true; s_sample_rate = s_wav.sampleRate;
             ndspChnSetRate(NDSP_CHANNEL, (float)s_wav.sampleRate);
             s_meta.duration_sec = (int)(s_wav.totalPCMFrameCount / s_wav.sampleRate);
             break;
@@ -550,18 +675,8 @@ Result audio_load(const char *path)
     return 0;
 }
 
-void audio_play(void)
-{
-    if (s_fmt == FMT_UNKNOWN) return;
-    s_state = AUDIO_PLAYING;
-    ndspChnSetPaused(NDSP_CHANNEL, false);
-}
-
-void audio_pause(void)
-{
-    s_state = AUDIO_PAUSED;
-    ndspChnSetPaused(NDSP_CHANNEL, true);
-}
+void audio_play(void)  { if (s_fmt == FMT_UNKNOWN) return; s_state = AUDIO_PLAYING; ndspChnSetPaused(NDSP_CHANNEL, false); }
+void audio_pause(void) { s_state = AUDIO_PAUSED; ndspChnSetPaused(NDSP_CHANNEL, true); }
 
 void audio_stop(void)
 {
@@ -572,16 +687,13 @@ void audio_stop(void)
     svcSleepThread(16000000LL);
     { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
       if(_f){fprintf(_f,"audio_stop: apres sleep\n");fclose(_f);} }
-
     if (s_vorbis)   { stb_vorbis_close(s_vorbis); s_vorbis   = NULL; }
     if (s_flac)     { drflac_close(s_flac);        s_flac     = NULL; }
     if (s_wav_open) { drwav_uninit(&s_wav);         s_wav_open = false; }
     if (s_mpg)      { mpg123_close(s_mpg); mpg123_delete(s_mpg); s_mpg = NULL; }
     if (s_opus)     { op_free(s_opus);              s_opus     = NULL; }
-
-    s_samples_played = 0;
-    s_fmt            = FMT_UNKNOWN;
-    s_sample_rate    = SAMPLE_RATE;
+    s_samples_played = 0; s_fmt = FMT_UNKNOWN;
+    s_sample_rate = SAMPLE_RATE;
     memset(s_wbufs, 0, sizeof(s_wbufs));
     s_buf_idx = 0;
 }
@@ -595,24 +707,37 @@ void audio_toggle_pause(void)
 void audio_seek(int seconds)
 {
     if (seconds < 0) seconds = 0;
-    u64 target = (u64)seconds * s_sample_rate;
+    int dur = s_meta.duration_sec;
+    if (dur > 0 && seconds > dur) seconds = dur;
+    ndspChnWaveBufClear(NDSP_CHANNEL);
+    s_seek_target    = (u64)seconds * s_sample_rate;
+    s_seek_requested = true;
+}
+
+static void do_seek(void)
+{
+    u64 target = s_seek_target;
     switch (s_fmt) {
         case FMT_OGG:  if (s_vorbis)   stb_vorbis_seek(s_vorbis, (unsigned int)target); break;
         case FMT_WAV:  if (s_wav_open) drwav_seek_to_pcm_frame(&s_wav, target);          break;
         case FMT_FLAC: if (s_flac)     drflac_seek_to_pcm_frame(s_flac, target);         break;
-        case FMT_MP3:  if (s_mpg)      mpg123_seek(s_mpg, (off_t)target, SEEK_SET);      break;
-        case FMT_OPUS: if (s_opus)     op_pcm_seek(s_opus, (ogg_int64_t)target);         break;
+        case FMT_MP3:  if (s_mpg) {
+            off_t res = mpg123_seek(s_mpg, (off_t)target, SEEK_SET);
+            if (res < 0) { mpg123_seek(s_mpg, 0, SEEK_SET); target = 0; }
+            break;
+        }
+        case FMT_OPUS: if (s_opus) op_pcm_seek(s_opus, (ogg_int64_t)target); break;
         default: break;
     }
     s_samples_played = target;
     ndspChnWaveBufClear(NDSP_CHANNEL);
     s_buf_idx = 0;
+    s_seek_requested = false;
 }
 
 int   audio_get_position(void)     { return s_sample_rate ? (int)(s_samples_played / s_sample_rate) : 0; }
 int   audio_get_duration(void)     { return s_meta.duration_sec; }
 float audio_get_position_pct(void) { return s_meta.duration_sec > 0 ? (float)audio_get_position() / s_meta.duration_sec : 0.f; }
-
 void  audio_set_volume(float v)    { s_volume = v < 0.f ? 0.f : (v > 1.f ? 1.f : v); set_mix(s_volume); }
 float audio_get_volume(void)       { return s_volume; }
 AudioState audio_get_state(void)   { return s_state; }
@@ -624,8 +749,11 @@ void audio_get_visualizer(float out[EQ_BANDS])
     for (int i = 0; i < EQ_BANDS; i++) out[i] = s_viz[i];
 }
 
-/* EQ stubs */
-static float s_eq_gains[EQ_BANDS] = {0};
+void audio_get_visualizer_fft(float out[EQ_BANDS])
+{
+    for (int i = 0; i < EQ_BANDS; i++) out[i] = s_viz_fft[i];
+}
+
 void  audio_eq_set_gain(int b, float db) { if (b >= 0 && b < EQ_BANDS) s_eq_gains[b] = db; }
 float audio_eq_get_gain(int b)           { return (b >= 0 && b < EQ_BANDS) ? s_eq_gains[b] : 0.f; }
 void  audio_eq_apply_preset(const EQPreset *p) { if (p) for (int i=0;i<EQ_BANDS;i++) s_eq_gains[i]=p->gain[i]; }

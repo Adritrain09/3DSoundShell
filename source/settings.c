@@ -1,6 +1,9 @@
+// settings.c
+
 #include "settings.h"
 #include "theme.h"
 #include "audio.h"
+#include "playlist.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -197,7 +200,7 @@ void settings_save_sync(void)
 }
 
 /* ── Settings items ───────────────────────────────────────────── */
-#define SITEM_COUNT 10
+#define SITEM_COUNT 9
 static const char *sitem_labels[SITEM_COUNT] = {
     "Volume",
     "Theme",
@@ -207,7 +210,6 @@ static const char *sitem_labels[SITEM_COUNT] = {
     "Repetition",
     "Reprendre au demarrage",
     "Repertoire de depart",
-    "EQ Preset",
     "Sauvegarder",
 };
 
@@ -216,8 +218,8 @@ static void sitem_value(int idx, char *buf, int bufsz)
     switch (idx) {
         case 0: snprintf(buf,bufsz,"%.0f%%", g_settings.volume*100); break;
         case 1: snprintf(buf,bufsz,"%s", theme_name(g_settings.theme_index)); break;
-        case 2: { const char *v[]={"Barres","Onde","Cercle"};
-                  snprintf(buf,bufsz,"%s",v[g_settings.viz_style]); break; }
+        case 2: { const char *v[]={"Barres","Onde","Cercle","EQ"};
+                  snprintf(buf,bufsz,"%s",v[g_settings.viz_style % 4]); break; }
         case 3: snprintf(buf,bufsz,"%s", g_settings.show_cover?"ON":"OFF"); break;
         case 4: snprintf(buf,bufsz,"%s", g_settings.shuffle?"ON":"OFF"); break;
         case 5: { const char *r[]={"Non","x1","Tout"};
@@ -245,11 +247,11 @@ void settings_draw_top(void)
     Theme *th = current_theme;
     draw_rect(0,0,TOP_WIDTH,26,th->bg_header);
     draw_text(8,5,0.55f,th->text_accent,"3DSoundShell - Parametres");
-    draw_text(10,40,0.5f,th->text_secondary,"Utilisez << >> pour modifier les valeurs.");
+    draw_text(10,40,0.5f,th->text_secondary,"Utilisez < > pour modifier les valeurs.");
     draw_text(10,58,0.5f,th->text_secondary,"A = confirmer  B = retour  Start = lecteur");
-    draw_text(10,90,0.48f,th->text_disabled,"Astuce: L+R=pause  << >>=piste  /\\=volume");
+    draw_text(10,90,0.48f,th->text_disabled,"Commande lecteur: L+R = play/pause  < >=piste  ↓↑=volume");
     draw_text(10,108,0.48f,th->text_disabled,"ZL/ZR = reculer/avancer 10s (New3DS)");
-    draw_text(10,126,0.48f,th->text_disabled,"R = changer visualiseur");
+    draw_text(10,126,0.48f,th->text_disabled,"R = changer visualiseur   A = play/Pause");
 
     /* Indicateur save */
     if (s_save_running) {
@@ -299,10 +301,19 @@ void settings_handle_input(int *selected_item, u32 keys_down)
                     theme_set(theme_get(g_settings.theme_index)); break;
             case 2: g_settings.viz_style=(VisualizerStyle)((g_settings.viz_style+1)%VIZ_COUNT); break;
             case 3: g_settings.show_cover=!g_settings.show_cover; break;
-            case 4: g_settings.shuffle=!g_settings.shuffle; break;
-            case 5: g_settings.repeat=(g_settings.repeat+1)%3; break;
+            case 4: g_settings.shuffle=!g_settings.shuffle;
+                    settings_save(); break;
+            case 5: g_settings.repeat=(g_settings.repeat+1)%3;
+                    settings_save(); break;
             case 6: g_settings.resume_on_start=!g_settings.resume_on_start; break;
-            case 8: g_settings.eq_preset_index=(g_settings.eq_preset_index+1)%6; break;
+            case 8: g_settings.eq_preset_index=(g_settings.eq_preset_index+1)%6;
+                    { EQPreset *presets[] = {
+                        &eq_preset_flat, &eq_preset_bass_boost,
+                        &eq_preset_vocal, &eq_preset_rock,
+                        &eq_preset_classical, &eq_preset_electronic };
+                      audio_eq_apply_preset(presets[g_settings.eq_preset_index]);
+                      for(int i=0;i<8;i++) g_settings.eq_gains[i]=audio_eq_get_gain(i); }
+                    break;
         }
     }
 
@@ -314,9 +325,18 @@ void settings_handle_input(int *selected_item, u32 keys_down)
             case 1: g_settings.theme_index=(g_settings.theme_index-1+theme_count())%theme_count();
                     theme_set(theme_get(g_settings.theme_index)); break;
             case 2: g_settings.viz_style=(VisualizerStyle)((g_settings.viz_style-1+VIZ_COUNT)%VIZ_COUNT); break;
-            case 4: g_settings.shuffle=!g_settings.shuffle; break;
-            case 5: g_settings.repeat=(g_settings.repeat+2)%3; break;
-            case 8: g_settings.eq_preset_index=(g_settings.eq_preset_index+5)%6; break;
+            case 4: g_settings.shuffle=!g_settings.shuffle;
+                    settings_save(); break;
+            case 5: g_settings.repeat=(g_settings.repeat+2)%3;
+                    settings_save(); break;
+            case 8: g_settings.eq_preset_index=(g_settings.eq_preset_index+5)%6;
+                    { EQPreset *presets[] = {
+                        &eq_preset_flat, &eq_preset_bass_boost,
+                        &eq_preset_vocal, &eq_preset_rock,
+                        &eq_preset_classical, &eq_preset_electronic };
+                      audio_eq_apply_preset(presets[g_settings.eq_preset_index]);
+                      for(int i=0;i<8;i++) g_settings.eq_gains[i]=audio_eq_get_gain(i); }
+                    break;
         }
     }
 

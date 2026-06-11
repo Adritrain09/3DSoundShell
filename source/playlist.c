@@ -1,3 +1,5 @@
+// playlist.C
+
 #include "playlist.h"
 #include "theme.h"
 #include <string.h>
@@ -211,9 +213,9 @@ void pl_draw_top(const Playlist *pl)
 
     // Shuffle / Repeat status
     char status[80];
-    const char *rep_str[]={"─","↺1","↺∞"};
+    const char *rep_str[]={"─","rep 1","rep ∞"};
     snprintf(status,80,"  %s  %s  %d pistes",
-        pl->shuffle?"🔀 Aléatoire":"Ordre normal",
+        pl->shuffle?"Aléatoire":"Ordre normal",
         rep_str[pl->repeat],
         pl->count);
     draw_text(8,30,0.45f,th->text_secondary,status);

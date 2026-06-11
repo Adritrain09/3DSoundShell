@@ -1,8 +1,12 @@
+// filebrowser.c
+
 #include "filebrowser.h"
+#include "favorites.h"
 #include "theme.h"
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <citro2d.h>
 
 /* ── TextBuf global ── */
@@ -26,12 +30,19 @@ static bool ext_match(const char *name)
     return false;
 }
 
+static void fb_sort(FileBrowser *fb); // forward declaration
+
+static SortMode s_sort_mode = SORT_NAME_AZ;
+
 static int cmp_entries(const void *a, const void *b)
 {
     const FileEntry *ea = (const FileEntry*)a;
     const FileEntry *eb = (const FileEntry*)b;
+    // Dossiers toujours en premier
     if(ea->is_dir && !eb->is_dir) return -1;
     if(!ea->is_dir && eb->is_dir) return  1;
+    if(s_sort_mode == SORT_NAME_ZA)
+        return strcasecmp(eb->name, ea->name);
     return strcasecmp(ea->name, eb->name);
 }
 
@@ -65,23 +76,47 @@ void fb_reload(FileBrowser *fb)
     struct dirent *ent;
     while((ent=readdir(d)) && fb->count < MAX_FILES-1) {
         if(!strcmp(ent->d_name,".")) continue;
-        // Allow ".." only if not root
         if(!strcmp(ent->d_name,"..")) {
             if(!strcmp(fb->cwd,"sdmc:/") || !strcmp(fb->cwd,"/")) continue;
         }
         FileEntry *fe = &fb->entries[fb->count];
         strncpy(fe->name, ent->d_name, MAX_FILENAME-1);
-        snprintf(fe->full_path, MAX_PATH, "%s/%s", fb->cwd, ent->d_name);
+        fe->name[MAX_FILENAME-1] = '\0';
+        snprintf(fe->full_path, MAX_PATH-1, "%s/%s", fb->cwd, ent->d_name);
+        fe->full_path[MAX_PATH-1] = '\0';
         fe->is_dir   = (ent->d_type == DT_DIR);
         fe->is_audio = !fe->is_dir && ext_match(ent->d_name);
-        fe->size     = 0;
+        // Taille non lue au chargement (trop lent sur SD 3DS)
+        fe->size = 0;
         fb->count++;
     }
     closedir(d);
+    fb_sort(fb);
+}
+
+// Tri seul, sans relire la SD
+void fb_sort(FileBrowser *fb)
+{
     qsort(fb->entries, fb->count, sizeof(FileEntry), cmp_entries);
 }
 
 bool fb_is_audio(const char *filename) { return ext_match(filename); }
+
+void fb_cycle_sort(FileBrowser *fb)
+{
+    s_sort_mode = (SortMode)((s_sort_mode + 1) % SORT_COUNT);
+    fb_sort(fb);  // Tri en RAM uniquement, pas de relecture SD !
+}
+
+const char *fb_sort_name(const FileBrowser *fb)
+{
+    switch(s_sort_mode) {
+        case SORT_NAME_AZ: return "Nom A-Z";
+        case SORT_NAME_ZA: return "Nom Z-A";
+        default:           return "Nom A-Z";
+    }
+    return "Nom A-Z";
+}
 
 void fb_select_next(FileBrowser *fb)
 {
@@ -125,8 +160,12 @@ void fb_draw_top(const FileBrowser *fb)
     snprintf(pathbuf,56,"  %s",fb->cwd);
     draw_text(4,28,0.43f,th->text_secondary,pathbuf);
     // Big hint
-    draw_text(10,120,0.5f,th->text_disabled,"A = Open   B = Back   X = Add to Playlist");
-    draw_text(10,140,0.5f,th->text_disabled,"Y = Add folder   Start = Player");
+    draw_text(10,120,0.5f,th->text_disabled,"A = Open   B = Back    Select = Reglage");
+    draw_text(10,140,0.5f,th->text_disabled,"Start = Player    L = Favori");
+    /* Tri actuel */
+    char sort_info[32];
+    snprintf(sort_info, 32, "Tri: %s  [R]", fb_sort_name(fb));
+    draw_text(10, 160, 0.45f, th->text_accent, sort_info);
 }
 
 // Bottom screen: scrollable file list
@@ -156,11 +195,18 @@ void fb_draw_bottom(const FileBrowser *fb)
         u32 icon_col = fe->is_dir ? th->accent : (fe->is_audio ? th->text_accent : th->text_disabled);
         draw_text(LIST_X, y+4, 0.44f, icon_col, icon);
 
+        // Favori etoile
+        if (fe->is_audio && fav_is_fav(fe->full_path))
+            draw_text(LIST_X+28, y+4, 0.44f, th->accent2, "*");
+
         // Name (truncate)
         char name[36]; snprintf(name,36,"%s",fe->name);
         u32 name_col = (i==fb->selected) ? th->text_primary :
                        (fe->is_audio ? th->text_primary : th->text_secondary);
-        draw_text(LIST_X+28, y+4, 0.44f, name_col, name);
+        float name_off = (fe->is_audio && fav_is_fav(fe->full_path)) ? 38.f : 28.f;
+        draw_text(LIST_X+name_off, y+4, 0.44f, name_col, name);
+
+
 
         // Separator
         draw_rect(0,y+ROW_H-1,BOT_WIDTH,1,th->border);

@@ -1,3 +1,5 @@
+// input.c
+
 #include "input.h"
 
 void input_update(InputState *inp)

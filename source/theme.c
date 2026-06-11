@@ -1,3 +1,5 @@
+// theme.c
+
 #include "theme.h"
 #include <stdio.h>
 #include <string.h>
