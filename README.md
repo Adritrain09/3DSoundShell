@@ -7,15 +7,15 @@ README généré par claude.ai et modifié par.. bas.. moi:
 
 ## ✨ Fonctionnalités
 
-- 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS, AIFF
+- 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS, AIFF.
 - 🎨 **Thèmes** : Dark, Light, Neon Purple, Forest — et thèmes personnalisés via fichier .ini
-- 📁 **Explorateur de fichiers** style 3DShell (tri dossiers/fichiers, navigation complète)
+- 📁 **Explorateur de fichiers** style 3DShell (tri alphabétique, dossiers/fichiers, navigation complète)
 - 🔀 **Lecture aléatoire** (Fisher-Yates shuffle)
 - 🔁 **Répétition** : Désactivée / Une piste / Toute la playlist
-- 📊 **Visualiseur audio** : 3 styles (Barres, Onde, Cercle radial)
-- 🖼️ **Pochettes d'album** (sir les formats compatible)
+- 📊 **Visualiseur audio** : 4 styles (Barres, Onde, Cercle radial, EQ Pro)
+- 🖼️ **Pochettes d'album** (sur les formats compatible)
 - 🎚️ **Égaliseur 8 bandes** : -12dB à +12dB, 6 présets intégrés
-- 💾 **Sauvegarde automatique** (piste, réglages)
+- 💾 **Sauvegarde automatique** (piste, réglages, equalizer)
 - ▶️ **Reprise automatique** au démarrage (optionnel)
 
 ---
@@ -104,24 +104,34 @@ Lancez via Homebrew Launcher
 Créez un fichier `.ini` dans `sdmc:/3DSoundShell/themes/` :
 
 ```ini
-name=Mon Thème
-bg_primary=0x004f5dff
-bg_secondary=0x003b47ff
-bg_header=0x002731ff
-bg_selected=0x007a8eff
-bg_playing=0x006375ff
-text_primary=0x3ef0ffff
-text_secondary=0x00b2c4ff
-text_accent=0x00ffd5ff
-text_disabled=0x005663ff
-accent=0x001f26ff
-accent2=0x008da3ff
-border=0x006d80ff
-scrollbar=0x005563ff
-progress_bg=0x002e38ff
-progress_fill=0x00ffd5ff
-eq_bar=0x3ef0ffff
-eq_handle=0xe0fbffff
+; Theme New 2DS Blue Violet — 3DSoundShell
+; Format: 0xRRGGBBFF
+
+name=New 2DS Blue Violet
+bg_primary=0x25114dff
+bg_secondary=0x1a0b36ff
+bg_header=0x110524ff
+bg_selected=0x491f8aff
+bg_playing=0x38146eff
+text_primary=0xd6c2ffff //nom music + barre prog
+text_secondary=0xa385e0ff //info pri
+text_accent=0xbb00ffff //3DSoundShell
+text_disabled=0x51387dff //info sec
+accent=0x6c62bfff //PLAY, info sec et Dossier indic
+accent2=0x612cb0ff
+border=0x441b80ff
+scrollbar=0x351266ff
+progress_bg=0x160730ff
+progress_fill=0x1500ceff
+eq_bar=0xd6c2ffff
+eq_handle=0xf3ebffff
+eq_bar_selected=0xffd700ff
+eq_bar_positive=0x00cc44ff
+eq_bar_negative=0xff2244ff
+eq_zero_line=0x441b80ff
+eq_bg=0x0c021aff
+vis_start=0x006effff
+vis_end=0xff00ffff
 ```
 
 Les couleurs sont au format `0xRRGGBBFF`.
