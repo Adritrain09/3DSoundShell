@@ -19,10 +19,62 @@
 
 #define NDSP_CHANNEL    0
 #define SAMPLE_RATE     44100
-#define SAMPLES_PER_BUF 8192
-#define NUM_BUFS        3
+#define SAMPLES_PER_BUF 16384  /* Double pour eviter underrun resampling */
+#define NUM_BUFS        6      /* 6 buffers = grande marge pour resampling */
 #define BYTES_PER_SAMPLE 2
 #define CHANNELS        2
+#define TARGET_RATE     44100  /* Frequence cible pour le resampling */
+
+/* Buffer de resampling statique (evite malloc dans le thread audio) */
+static s16 s_resample_buf[SAMPLES_PER_BUF * 2 * 2]; /* *2 ratio max, *2 stereo */
+
+/* Retourne true si la frequence necessite un resampling vers TARGET_RATE */
+static bool needs_resample(u32 rate) { return rate != TARGET_RATE; }
+
+/* Resampling lineaire stereo s16 : in_rate -> TARGET_RATE
+   in_buf   = buffer source (stereo s16)
+   in_pairs = paires stereo en entree
+   out_buf  = buffer destination
+   Retourne le nombre de paires en sortie */
+/* Position fractionnaire persistante entre les buffers
+   DOIT être remise à 0 lors d un nouveau chargement ou seek */
+static u32 s_resample_pos_fp = 0;
+
+/* Appelé par audio_stop() et do_seek() pour reset la position */
+static void resample_reset(void) { s_resample_pos_fp = 0; }
+
+static int do_resample(const s16 *in_buf, int in_pairs,
+                        u32 in_rate, s16 *out_buf)
+{
+    if (!needs_resample(in_rate)) {
+        memcpy(out_buf, in_buf, in_pairs * 2 * sizeof(s16));
+        return in_pairs;
+    }
+    /* Resampling entier virgule fixe 16:16
+       ratio_fp = combien avancer dans source pour 1 sample destination */
+    u32 ratio_fp  = ((u32)in_rate << 16) / (u32)TARGET_RATE;
+    int out_pairs = (int)(((u64)in_pairs << 16) / ratio_fp);
+    if (out_pairs < 1) return 0;
+    if (out_pairs > SAMPLES_PER_BUF) out_pairs = SAMPLES_PER_BUF;
+
+    /* s_resample_pos_fp est PERSISTANT entre les buffers
+       → pas de discontinuité aux jointures = pas de clic */
+    for (int i = 0; i < out_pairs; i++) {
+        int idx  = (int)(s_resample_pos_fp >> 16);
+        int frac = (int)(s_resample_pos_fp & 0xFFFF);
+        if (idx >= in_pairs - 1) idx = in_pairs - 2;
+        if (idx < 0) idx = 0;
+        out_buf[i*2]   = (s16)(in_buf[idx*2]
+            + ((in_buf[(idx+1)*2]   - in_buf[idx*2])   * frac >> 16));
+        out_buf[i*2+1] = (s16)(in_buf[idx*2+1]
+            + ((in_buf[(idx+1)*2+1] - in_buf[idx*2+1]) * frac >> 16));
+        s_resample_pos_fp += ratio_fp;
+    }
+    /* Garder seulement la partie fractionnaire pour le prochain buffer
+       La partie entière repart de 0 car on a un nouveau in_buf */
+    s_resample_pos_fp &= 0xFFFF;
+    return out_pairs;
+}
 
 typedef enum {
     FMT_UNKNOWN, FMT_OGG, FMT_WAV, FMT_FLAC, FMT_MP3, FMT_OPUS
@@ -190,8 +242,10 @@ static AudioFormat detect_fmt(const char *path)
     e++;
     if (!strcasecmp(e,"ogg") || !strcasecmp(e,"oga"))  return FMT_OGG;
     if (!strcasecmp(e,"flac"))                          return FMT_FLAC;
-    if (!strcasecmp(e,"wav") || !strcasecmp(e,"aiff")) return FMT_WAV;
-    if (!strcasecmp(e,"mp3") || !strcasecmp(e,"mp2") || !strcasecmp(e,"aac")) return FMT_MP3;
+    if (!strcasecmp(e,"wav"))  return FMT_WAV;
+    /* AIFF non supporte par dr_wav sur 3DS → ignorer */
+    /* AAC non supporte par mpg123 sans plugin → ignorer */
+    if (!strcasecmp(e,"mp3") || !strcasecmp(e,"mp2")) return FMT_MP3;
     if (!strcasecmp(e,"opus"))                          return FMT_OPUS;
     return FMT_UNKNOWN;
 }
@@ -359,7 +413,7 @@ static void apply_eq(s16 *buf, int pairs)
 }
 
 /* ── FFT Visualiseur ────────────────────────────────────────── */
-#define FFT_SIZE 512
+#define FFT_SIZE 256
 
 static float s_fft_re[FFT_SIZE];
 static float s_fft_im[FFT_SIZE];
@@ -421,8 +475,8 @@ static void update_viz(const s16 *buf, int pairs)
        bin = freq * FFT_SIZE / sample_rate
        sr=44100, FFT=512: 1bin = 86Hz
        Limites: 0 45 90 180 375 750 3500 8000 11025 Hz */
-    static const int BSTART[EQ_BANDS] = { 0,  0,  1,  2,  4,  8, 40, 92};
-    static const int BEND  [EQ_BANDS] = { 0,  1,  2,  4,  8, 40, 92,127};
+    static const int BSTART[EQ_BANDS] = { 0,  0,  1,  1,  2,  4, 20, 46};
+    static const int BEND  [EQ_BANDS] = { 0,  1,  1,  2,  4, 20, 46, 63};
 
     /* Boost par bande pour equilibrer (les aigus ont plus de bins = energie diluee) */
     static const float BOOST[EQ_BANDS] = {1.3f, 1.2f, 1.5f, 1.6f, 1.5f, 4.f, 6.6f, 9.3f};
@@ -475,21 +529,62 @@ static void audio_lock_init(void)
 static void audio_thread(void *arg)
 {
     (void)arg;
+    /* Compteur pour calculer la viz 1 buffer sur 3 seulement
+       Le visualiseur est rafraichi ~20 fois/sec ce qui est largement suffisant
+       et evite de surcharger le CPU avec la FFT a chaque buffer */
+    int viz_counter = 0;
     while (s_thread_run) {
         if (s_state != AUDIO_PLAYING) { svcSleepThread(16000000LL); continue; }
         ndspWaveBuf *wb = &s_wbufs[s_buf_idx];
         if (wb->status == NDSP_WBUF_QUEUED || wb->status == NDSP_WBUF_PLAYING) {
-            svcSleepThread(8000000LL); continue;
+            /* Sleep court pour 48000Hz (resampling plus lourd)
+               Sleep plus long pour 44100Hz (natif, moins de CPU) */
+            if (needs_resample(s_sample_rate))
+                svcSleepThread(3000000LL);  /* 3ms pour freq non-native */
+            else
+                svcSleepThread(10000000LL); /* 10ms pour 44100Hz natif */
+            continue;
         }
         if (s_seek_requested) do_seek();
         LightLock_Lock(&s_audio_lock);
-        s16 *pcm   = s_pcm_buf + s_buf_idx * SAMPLES_PER_BUF * CHANNELS;
-        int  pairs = decode_chunk(pcm, SAMPLES_PER_BUF);
+        s16 *pcm = s_pcm_buf + s_buf_idx * SAMPLES_PER_BUF * CHANNELS;
+        int pairs;
+        if (needs_resample(s_sample_rate)) {
+            /* Calculer combien de samples SOURCE decoder pour obtenir
+               exactement SAMPLES_PER_BUF samples en sortie TARGET
+               ex: 48000->44100 : ratio=1.088, on decode 8192*1.088=~8924 */
+            float ratio = (float)s_sample_rate / (float)TARGET_RATE;
+            int   need  = (int)((float)SAMPLES_PER_BUF * ratio) + 4;
+            /* Le buffer fait SAMPLES_PER_BUF*4 donc largement assez */
+            if (need > SAMPLES_PER_BUF * 2) need = SAMPLES_PER_BUF * 2;
+            int raw = decode_chunk(s_resample_buf, need);
+            if (raw <= 0) {
+                LightLock_Unlock(&s_audio_lock);
+                s_state = AUDIO_STOPPED; continue;
+            }
+            pairs = do_resample(s_resample_buf, raw, s_sample_rate, pcm);
+        } else {
+            /* Frequence native 44100Hz : pas de resampling */
+            pairs = decode_chunk(pcm, SAMPLES_PER_BUF);
+        }
         LightLock_Unlock(&s_audio_lock);
         if (pairs <= 0) { s_state = AUDIO_STOPPED; continue; }
-        s_samples_played += pairs;
+        /* Comptage en samples SOURCE pour que get_position() soit correct
+           Si 48000->44100 : pairs est en 44100, on reconvertit en 48000 */
+        if (needs_resample(s_sample_rate))
+            s_samples_played += (u64)((float)pairs
+                                * (float)s_sample_rate / (float)TARGET_RATE);
+        else
+            s_samples_played += pairs;
         apply_eq(pcm, pairs);
-        update_viz(pcm, pairs);
+        /* Viz calculee 1 buffer sur 3 pour reduire charge CPU
+           Changer 3 → 2 pour plus de reactivite viz (mais plus de CPU)
+           Changer 3 → 4 pour moins de charge CPU (viz moins reactive) */
+        viz_counter++;
+        if (viz_counter >= 4) {
+            update_viz(pcm, pairs);
+            viz_counter = 0;
+        }
         if (s_volume != 1.0f) {
             for (int i = 0; i < pairs * CHANNELS; i++) {
                 float sv = pcm[i] * s_volume;
@@ -497,6 +592,8 @@ static void audio_thread(void *arg)
             }
         }
         DSP_FlushDataCache(pcm, pairs * CHANNELS * BYTES_PER_SAMPLE);
+        /* Reset complet du wavebuf pour eviter valeurs residuelles */
+        memset(wb, 0, sizeof(ndspWaveBuf));
         wb->data_vaddr = pcm;
         wb->nsamples   = pairs;
         wb->looping    = false;
@@ -527,7 +624,7 @@ Result audio_init(void)
     strncpy(s_meta.title,  "Aucune piste",    sizeof(s_meta.title)-1);
     strncpy(s_meta.artist, "Artiste inconnu", sizeof(s_meta.artist)-1);
     s_thread_run = true;
-    s_thread = threadCreate(audio_thread, NULL, 32*1024, 0x18, -1, false);
+    s_thread = threadCreate(audio_thread, NULL, 32*1024, 0x19, -1, false);
     if (!s_thread) {
         s_thread_run = false; free_cover();
         linearFree(s_pcm_buf); s_pcm_buf = NULL;
@@ -585,8 +682,9 @@ Result audio_load(const char *path)
             s_vorbis = stb_vorbis_open_filename(path, &err, NULL);
             if (!s_vorbis) return (Result)-1;
             s_vinfo = stb_vorbis_get_info(s_vorbis);
-            ndspChnSetRate(NDSP_CHANNEL, (float)s_vinfo.sample_rate);
+            ndspChnSetRate(NDSP_CHANNEL, needs_resample(s_vinfo.sample_rate) ? (float)TARGET_RATE : (float)s_vinfo.sample_rate);
             s_sample_rate = s_vinfo.sample_rate;
+
             int total = stb_vorbis_stream_length_in_samples(s_vorbis);
             if (s_vinfo.sample_rate > 0) s_meta.duration_sec = total / s_vinfo.sample_rate;
             stb_vorbis_comment c = stb_vorbis_get_comment(s_vorbis);
@@ -604,7 +702,7 @@ Result audio_load(const char *path)
         case FMT_WAV: {
             if (!drwav_init_file(&s_wav, path, NULL)) return (Result)-1;
             s_wav_open = true; s_sample_rate = s_wav.sampleRate;
-            ndspChnSetRate(NDSP_CHANNEL, (float)s_wav.sampleRate);
+            ndspChnSetRate(NDSP_CHANNEL, needs_resample(s_wav.sampleRate) ? (float)TARGET_RATE : (float)s_wav.sampleRate);
             s_meta.duration_sec = (int)(s_wav.totalPCMFrameCount / s_wav.sampleRate);
             break;
         }
@@ -612,7 +710,7 @@ Result audio_load(const char *path)
             s_flac = drflac_open_file(path, NULL);
             if (!s_flac) return (Result)-1;
             s_sample_rate = s_flac->sampleRate;
-            ndspChnSetRate(NDSP_CHANNEL, (float)s_flac->sampleRate);
+            ndspChnSetRate(NDSP_CHANNEL, needs_resample(s_flac->sampleRate) ? (float)TARGET_RATE : (float)s_flac->sampleRate);
             if (s_flac->sampleRate > 0)
                 s_meta.duration_sec = (int)(s_flac->totalPCMFrameCount / s_flac->sampleRate);
             break;
@@ -630,7 +728,7 @@ Result audio_load(const char *path)
             mpg123_getformat(s_mpg, &rate, &ch, &enc);
             mpg123_format_none(s_mpg);
             mpg123_format(s_mpg, rate, 2, MPG123_ENC_SIGNED_16);
-            ndspChnSetRate(NDSP_CHANNEL, (float)rate);
+            ndspChnSetRate(NDSP_CHANNEL, needs_resample((u32)rate) ? (float)TARGET_RATE : (float)rate);
             s_sample_rate = rate;
             off_t len = mpg123_length(s_mpg);
             if (len > 0 && rate > 0) s_meta.duration_sec = (int)(len / rate);
@@ -652,7 +750,7 @@ Result audio_load(const char *path)
             int err = 0;
             s_opus = op_open_file(path, &err);
             if (!s_opus) return (Result)-1;
-            ndspChnSetRate(NDSP_CHANNEL, 48000.f);
+            ndspChnSetRate(NDSP_CHANNEL, (float)TARGET_RATE); /* OPUS 48000->44100 resample */
             s_sample_rate = 48000;
             ogg_int64_t len = op_pcm_total(s_opus, -1);
             if (len > 0) s_meta.duration_sec = (int)(len / 48000);
@@ -693,6 +791,7 @@ void audio_stop(void)
     if (s_mpg)      { mpg123_close(s_mpg); mpg123_delete(s_mpg); s_mpg = NULL; }
     if (s_opus)     { op_free(s_opus);              s_opus     = NULL; }
     s_samples_played = 0; s_fmt = FMT_UNKNOWN;
+    resample_reset(); /* Reset position resampling */
     s_sample_rate = SAMPLE_RATE;
     memset(s_wbufs, 0, sizeof(s_wbufs));
     s_buf_idx = 0;
@@ -709,32 +808,62 @@ void audio_seek(int seconds)
     if (seconds < 0) seconds = 0;
     int dur = s_meta.duration_sec;
     if (dur > 0 && seconds > dur) seconds = dur;
-    ndspChnWaveBufClear(NDSP_CHANNEL);
+    /* NE PAS appeler ndspChnWaveBufClear ici !
+       Ca bloque le DSP depuis le thread principal → freeze
+       do_seek() dans le thread audio s'en charge */
     s_seek_target    = (u64)seconds * s_sample_rate;
     s_seek_requested = true;
 }
 
 static void do_seek(void)
 {
-    u64 target = s_seek_target;
-    switch (s_fmt) {
-        case FMT_OGG:  if (s_vorbis)   stb_vorbis_seek(s_vorbis, (unsigned int)target); break;
-        case FMT_WAV:  if (s_wav_open) drwav_seek_to_pcm_frame(&s_wav, target);          break;
-        case FMT_FLAC: if (s_flac)     drflac_seek_to_pcm_frame(s_flac, target);         break;
-        case FMT_MP3:  if (s_mpg) {
-            off_t res = mpg123_seek(s_mpg, (off_t)target, SEEK_SET);
-            if (res < 0) { mpg123_seek(s_mpg, 0, SEEK_SET); target = 0; }
-            break;
-        }
-        case FMT_OPUS: if (s_opus) op_pcm_seek(s_opus, (ogg_int64_t)target); break;
-        default: break;
-    }
-    s_samples_played = target;
-    ndspChnWaveBufClear(NDSP_CHANNEL);
-    s_buf_idx = 0;
     s_seek_requested = false;
+    u64 target = s_seek_target;
+
+    /* Seek dans le fichier source */
+    switch (s_fmt) {
+        case FMT_OGG:
+            if (s_vorbis)
+                stb_vorbis_seek(s_vorbis, (unsigned int)target);
+            break;
+        case FMT_WAV:
+            if (s_wav_open)
+                drwav_seek_to_pcm_frame(&s_wav, target);
+            break;
+        case FMT_FLAC:
+            if (s_flac)
+                drflac_seek_to_pcm_frame(s_flac, target);
+            break;
+        case FMT_MP3:
+            if (s_mpg) {
+                off_t res = mpg123_seek(s_mpg, (off_t)target, SEEK_SET);
+                if (res < 0) {
+                    mpg123_seek(s_mpg, 0, SEEK_SET);
+                    target = 0;
+                }
+            }
+            break;
+        case FMT_OPUS:
+            if (s_opus)
+                op_pcm_seek(s_opus, (ogg_int64_t)target);
+            break;
+        default:
+            break;
+    }
+
+    /* Mettre a jour la position affichee */
+    s_samples_played = target;
+
+    /* Reset position resampling pour eviter clic au resume */
+    resample_reset();
+
+    /* PAS de ndspChnWaveBufClear ici !
+       Le NDSP finit naturellement son buffer actuel
+       Le prochain decode_chunk lira depuis la nouvelle position
+       = pas de saut, pas de silence */
 }
 
+u32   audio_get_sample_rate(void)  { return s_sample_rate; }
 int   audio_get_position(void)     { return s_sample_rate ? (int)(s_samples_played / s_sample_rate) : 0; }
 int   audio_get_duration(void)     { return s_meta.duration_sec; }
 float audio_get_position_pct(void) { return s_meta.duration_sec > 0 ? (float)audio_get_position() / s_meta.duration_sec : 0.f; }

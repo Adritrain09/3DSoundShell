@@ -20,8 +20,9 @@ static bool ext_match(const char *name)
 {
     const char *exts[] = {
         ".mp3",".mp2",".ogg",".oga",".flac",
-        ".wav",".aiff",".aac",".m4a",".opus",
-        ".wma",".ac3", NULL
+        ".wav",".opus",
+        NULL
+        /* AAC, AIFF, WMA, AC3 non supportes sur 3DS */
     };
     const char *dot = strrchr(name,'.');
     if(!dot) return false;
@@ -211,6 +212,14 @@ void fb_draw_bottom(const FileBrowser *fb)
         // Separator
         draw_rect(0,y+ROW_H-1,BOT_WIDTH,1,th->border);
     }
+
+    // Fleches navigation tactile (haut/bas, coin droit)
+    // Fleche haut : Y=30 a 52, X=300 a 320
+    draw_rect(300, 30, 20, 22, th->bg_secondary);
+    draw_text(304, 33, 0.50f, th->text_primary, "^");
+    // Fleche bas : Y=218 a 240, X=300 a 320
+    draw_rect(300, 218, 20, 22, th->bg_secondary);
+    draw_text(304, 221, 0.50f, th->text_primary, "v");
 
     // Scrollbar
     if(fb->count > fb->visible_rows) {

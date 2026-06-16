@@ -18,8 +18,9 @@
 static bool is_audio(const char *n)
 {
     const char *exts[]=
-        {".mp3",".mp2",".ogg",".flac",".wav",
-         ".aiff",".aac",".m4a",".opus",".wma",NULL};
+        {".mp3",".mp2",".ogg",".oga",".flac",
+         ".wav",".opus",NULL};
+         /* AAC AIFF WMA non supportes */
     const char *d=strrchr(n,'.');
     if(!d) return false;
     for(int i=0;exts[i];i++) if(!strcasecmp(d,exts[i])) return true;
@@ -262,10 +263,16 @@ void pl_draw_bottom(Playlist *pl)
         draw_text(28,y+4,0.44f,col,name);
 
         if(i==pl->current)
-            draw_text(BOT_WIDTH-18,y+4,0.44f,th->accent,"▶");
+            draw_text(BOT_WIDTH-18,y+4,0.44f,th->accent,">");
 
         draw_rect(0,y+ROW_H-1,BOT_WIDTH,1,th->border);
     }
+
+    // Fleches navigation tactile (haut/bas, coin droit)
+    draw_rect(300, 30, 20, 22, th->bg_secondary);
+    draw_text(304, 33, 0.50f, th->text_primary, "^");
+    draw_rect(300, 218, 20, 22, th->bg_secondary);
+    draw_text(304, 221, 0.50f, th->text_primary, "v");
 
     // Scrollbar
     if(pl->count>vis) {

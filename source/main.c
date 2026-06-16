@@ -1,6 +1,6 @@
 /*
 ** main.c — 3DSoundShell
-** Lecteur de musique pour Nintendo 3DS
+** 3DSoundShell - Music Player by Adri
 */
 #include <3ds.h>
 #include <citro2d.h>
@@ -20,13 +20,69 @@
 #include "player_ui.h"
 #include "settings.h"
 #include "input.h"
+#include "favorites.h"
+
+/* Variables globales 3D stéréoscopique */
+float g_3d_iod = 0.f;
+int   g_3d_eye = 0;
+
+/* ── TextBuf global partagé (filebrowser, equalizer, etc.) ── */
+static u64   s_touch_arrow_held_time = 0;
+static bool  s_touch_arrow_up        = false;
+static bool  s_touch_arrow_down      = false;
+static bool  s_touch_arrow_rep       = false;
+#define ARROW_DELAY_MS  400
+#define ARROW_REPEAT_MS 100
 
 /* Forward declarations equalizer */
 extern void eq_draw_top(int selected_band);
 extern void eq_draw_bottom(int selected_band);
 extern void eq_handle_input(int *selected_band, u32 keys_down);
 
+/* ── Forward declarations navigation ─────────────────────── */
+static void nav_enter(const char *path);
+
+/* Retourne true si la flèche tactile doit déclencher un scroll ce frame
+   dir = true → flèche haut, false → flèche bas */
+static bool touch_arrow_tick(bool up)
+{
+    u64 now = osGetTime();
+
+    /* Nouveau appui sur cette flèche */
+    if ((up && !s_touch_arrow_up) || (!up && !s_touch_arrow_down)) {
+        s_touch_arrow_up        = up;
+        s_touch_arrow_down      = !up;
+        s_touch_arrow_held_time = now;
+        s_touch_arrow_rep       = false;
+        return true; /* premier déclenchement immédiat */
+    }
+
+    /* Flèche maintenue → répétition après délai */
+    u64 held = now - s_touch_arrow_held_time;
+    if (!s_touch_arrow_rep && held >= ARROW_DELAY_MS) {
+        s_touch_arrow_rep       = true;
+        s_touch_arrow_held_time = now; /* reset timer pour intervalle */
+        return true;
+    }
+    if (s_touch_arrow_rep && held >= ARROW_REPEAT_MS) {
+        s_touch_arrow_held_time = now;
+        return true;
+    }
+    return false;
+}
+
+/* Réinitialiser l état des flèches quand on relâche */
+static void touch_arrow_reset(void)
+{
+    s_touch_arrow_up   = false;
+    s_touch_arrow_down = false;
+    s_touch_arrow_rep  = false;
+}
+static void nav_go_up(void);
+
 /* ── Global state ─────────────────────────────────────────── */
+static volatile bool g_loading        = false;
+static char          g_load_path[512] = {0};
 static AppState    g_state        = STATE_FILE_BROWSER;
 static FileBrowser g_browser;
 static Playlist    g_playlist;
@@ -37,7 +93,8 @@ static int         g_eq_band      = 0;
 static volatile bool g_init_done  = false;
 
 /* ── Render targets ───────────────────────────────────────── */
-static C3D_RenderTarget *g_top = NULL;
+static C3D_RenderTarget *g_top       = NULL;
+static C3D_RenderTarget *g_top_right = NULL;
 static C3D_RenderTarget *g_bot = NULL;
 
 /* ── Debug log ────────────────────────────────────────────── */
@@ -53,28 +110,42 @@ extern void reset_load_timer(void);
 static u64 s_load_time = 0;
 void reset_load_timer(void) { s_load_time = 0; }
 
+static void load_thread_func(void *arg)
+{
+    (void)arg;
+    Result r = audio_load(g_load_path);
+    if (!R_FAILED(r)) {
+        audio_set_volume(g_settings.volume);
+        audio_play();
+        player_ui_load_cover(&g_player_ui, audio_get_metadata());
+        strncpy(g_settings.last_path, g_load_path, 511);
+        g_settings.last_track    = g_playlist.current;
+        g_settings.last_position = 0;
+    }
+    g_loading = false;
+}
+
 static void load_and_play(const char *path)
 {
-    s_load_time = osGetTime(); /* marquer debut chargement */
-    Result r = audio_load(path);
-    {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "audio_load=%ld path=%s", r, path);
-        dbg(buf);
+    if (g_loading) return; /* deja en chargement */
+    strncpy(g_load_path, path, 511);
+    g_loading = true;
+    g_state   = STATE_PLAYER;
+
+    Thread t = threadCreate(load_thread_func, NULL, 32*1024, 0x30, -1, true);
+    if (!t) {
+        /* Fallback synchrone si thread impossible */
+        Result r = audio_load(path);
+        if (!R_FAILED(r)) {
+            audio_set_volume(g_settings.volume);
+            audio_play();
+            player_ui_load_cover(&g_player_ui, audio_get_metadata());
+            strncpy(g_settings.last_path, path, 511);
+            g_settings.last_track    = g_playlist.current;
+            g_settings.last_position = 0;
+        }
+        g_loading = false;
     }
-    if (R_FAILED(r)) return;
-
-    audio_set_volume(g_settings.volume);
-    audio_play();
-    player_ui_load_cover(&g_player_ui, audio_get_metadata());
-
-    /* Sauvegarder immediatement la piste courante */
-    strncpy(g_settings.last_path, path, 511);
-    g_settings.last_track    = g_playlist.current;
-    g_settings.last_position = 0;
-    settings_save(); /* Async: pas de freeze */
-    
-    g_state = STATE_PLAYER;
 }
 
 static void play_current_track(void)
@@ -85,17 +156,37 @@ static void play_current_track(void)
 }
 
 /* ── Touch seek ───────────────────────────────────────────── */
+/* Position tactile mémorisée pendant le glissement */
+static bool  s_touch_seeking = false;
+static float s_touch_seek_pct = 0.f;
+
 static void handle_touch_seek(void)
 {
-    if (!g_input.touch_held) return;
     int dur = audio_get_duration();
     if (dur <= 0) return;
-    int tx = g_input.touch.px, ty = g_input.touch.py;
-    if (ty >= 8 && ty <= 20 && tx >= 10 && tx <= 310) {
+
+    /* Zone tactile : barre de seek sur ecran du BAS
+       X : 10 a 310 (300px de large)
+       Y : 28 a 48  (barre visible dans player_ui_draw_bottom) */
+    int tx = g_input.touch.px;
+    int ty = g_input.touch.py;
+
+    if (g_input.touch_held && ty >= 220 && ty <= 240
+        && tx >= 10 && tx <= 310)
+    {
+        /* Pendant le glissement : memoriser la position SANS seek
+           pour eviter le freeze du DSP */
         float pct = (float)(tx - 10) / 300.f;
         if (pct < 0.f) pct = 0.f;
         if (pct > 1.f) pct = 1.f;
-        audio_seek((int)(pct * dur));
+        s_touch_seeking  = true;
+        s_touch_seek_pct = pct;
+    }
+    else if (s_touch_seeking && !g_input.touch_held)
+    {
+        /* Au relachement : seek UNE SEULE FOIS */
+        audio_seek((int)(s_touch_seek_pct * dur));
+        s_touch_seeking = false;
     }
 }
 
@@ -104,6 +195,70 @@ static void input_file_browser(void)
 {
     u32 kd   = g_input.down;
     u32 held = g_input.held;
+
+    /* ── Tactile file browser ────────────────────────────────
+       Chaque ligne : Y = 30 + (i - scroll) * 22, H = 22
+       Toucher une ligne = sélectionner
+       Double tap = ouvrir (simulé par touch_down sur ligne déjà sélectionnée) */
+    /* Flèches maintenues → défilement continu */
+    if (g_input.touch_held) {
+        int tx = g_input.touch.px;
+        int ty = g_input.touch.py;
+        if (tx >= 300 && tx <= 320 && ty >= 30 && ty <= 52) {
+            if (touch_arrow_tick(true))
+                fb_select_prev(&g_browser);
+        } else if (tx >= 300 && tx <= 320 && ty >= 218 && ty <= 240) {
+            if (touch_arrow_tick(false))
+                fb_select_next(&g_browser);
+        } else if (!g_input.touch_down) {
+            /* Doigt tenu ailleurs → reset flèches */
+            touch_arrow_reset();
+        }
+    }
+    if (!g_input.touch_held) touch_arrow_reset();
+
+    /* Tap sur liste ou flèches (premier contact) */
+    if (g_input.touch_down) {
+        int tx = g_input.touch.px;
+        int ty = g_input.touch.py;
+
+        /* Zone liste : Y >= 30, X < 300 */
+        if (ty >= 30 && tx < 300) {
+            int row = (ty - 30) / 22;
+            int idx = g_browser.scroll_offset + row;
+
+            if (idx >= 0 && idx < g_browser.count) {
+                if (idx == g_browser.selected) {
+                    /* Déjà sélectionné → ouvrir */
+                    FileEntry *fe = &g_browser.entries[idx];
+                    if (fe->is_dir) {
+                        if (!strcmp(fe->name, "..")) nav_go_up();
+                        else                         nav_enter(fe->full_path);
+                    } else if (fe->is_audio) {
+                        pl_clear(&g_playlist);
+                        pl_add_dir(&g_playlist, g_browser.cwd);
+                        for (int i = 0; i < g_playlist.count; i++) {
+                            if (!strcmp(g_playlist.items[i].path,
+                                        fe->full_path)) {
+                                pl_jump(&g_playlist, i);
+                                break;
+                            }
+                        }
+                        play_current_track();
+                    }
+                } else {
+                    /* Sélectionner */
+                    g_browser.selected = idx;
+                    if (g_browser.selected < g_browser.scroll_offset)
+                        g_browser.scroll_offset = g_browser.selected;
+                    if (g_browser.selected >= g_browser.scroll_offset
+                                            + g_browser.visible_rows)
+                        g_browser.scroll_offset = g_browser.selected
+                                                 - g_browser.visible_rows + 1;
+                }
+            }
+        }
+    }
 
     /* Navigation verticale */
     if (kd & KEY_DOWN) fb_select_next(&g_browser);
@@ -134,8 +289,8 @@ static void input_file_browser(void)
         if (g_browser.count == 0) return;
         FileEntry *fe = &g_browser.entries[g_browser.selected];
         if (fe->is_dir) {
-            if (!strcmp(fe->name, "..")) fb_go_up(&g_browser);
-            else                         fb_enter_dir(&g_browser, fe->full_path);
+            if (!strcmp(fe->name, "..")) nav_go_up();
+            else                         nav_enter(fe->full_path);
         } else if (fe->is_audio) {
             pl_clear(&g_playlist);
             pl_add_dir(&g_playlist, g_browser.cwd);
@@ -149,7 +304,7 @@ static void input_file_browser(void)
         }
     }
 
-    if (kd & KEY_B) fb_go_up(&g_browser);
+    if (kd & KEY_B) nav_go_up();
 
     if (kd & KEY_X) {
         if (g_browser.count == 0) return;
@@ -160,6 +315,15 @@ static void input_file_browser(void)
     if (kd & KEY_Y)     pl_add_dir(&g_playlist, g_browser.cwd);
     if (kd & KEY_START) g_state = STATE_PLAYER;
     if (kd & KEY_SELECT)g_state = STATE_SETTINGS;
+    if (kd & KEY_R)     fb_cycle_sort(&g_browser);
+    /* L = toggle favori sur fichier audio selectionne */
+    if (kd & KEY_L) {
+        if (g_browser.count > 0) {
+            FileEntry *fe = &g_browser.entries[g_browser.selected];
+            if (fe->is_audio)
+                fav_toggle(fe->full_path, fe->name);
+        }
+    }
 
     (void)held;
 }
@@ -175,10 +339,19 @@ static void input_player(void)
     if ((kd & KEY_R) && (held & KEY_L)) { audio_toggle_pause(); return; }
 
     if (kd & KEY_LEFT) {
-        if (pl_prev(&g_playlist) >= 0) play_current_track();
+        // Forcer prev même en REPEAT_ONE
+        RepeatMode saved = g_playlist.repeat;
+        if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
+        int n = pl_prev(&g_playlist);
+        g_playlist.repeat = saved;
+        if (n >= 0) play_current_track();
     }
     if (kd & KEY_RIGHT) {
+        // Forcer next même en REPEAT_ONE
+        RepeatMode saved = g_playlist.repeat;
+        if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
         int n = pl_next(&g_playlist);
+        g_playlist.repeat = saved;
         if (n >= 0) play_current_track();
         else        audio_stop();
     }
@@ -200,9 +373,21 @@ static void input_player(void)
     if ((g_input.up & KEY_UP) || (g_input.up & KEY_DOWN))
         settings_save();
 
-    if (kd & KEY_ZL) audio_seek(audio_get_position() - 10);
-    if (kd & KEY_ZR) audio_seek(audio_get_position() + 10);
-    if (kd & KEY_R)  player_ui_cycle_viz(&g_player_ui);
+    if (kd & KEY_ZL) {
+        { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
+          if(_f){fprintf(_f,"ZL pressed pos=%d\n",audio_get_position());fclose(_f);} }
+        audio_seek(audio_get_position() - 10);
+    }
+    if (kd & KEY_ZR) {
+        { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
+          if(_f){fprintf(_f,"ZR pressed pos=%d\n",audio_get_position());fclose(_f);} }
+        audio_seek(audio_get_position() + 10);
+    }
+    if (kd & KEY_R) {
+        player_ui_cycle_viz(&g_player_ui);
+        g_settings.viz_style = g_player_ui.viz_style;
+        settings_save();
+    }
     if (kd & KEY_Y) { pl_toggle_shuffle(&g_playlist); g_settings.shuffle = g_playlist.shuffle; settings_save(); }
     if (kd & KEY_A)  audio_toggle_pause();
     if (kd & KEY_B)  g_state = STATE_FILE_BROWSER;
@@ -210,6 +395,38 @@ static void input_player(void)
     if (kd & KEY_X)  g_state = STATE_PLAYLIST;
 
     handle_touch_seek();
+
+    /* ── Boutons tactiles ecran du bas ──────────────────────────
+       Coordonnees identiques a player_ui_draw_bottom :
+       Prec    : X=14  a 94,  Y=36 a 56
+       Pause   : X=110 a 190, Y=36 a 56
+       Suiv    : X=222 a 302, Y=36 a 56 */
+    if (g_input.touch_down) {
+        int tx = g_input.touch.px;
+        int ty = g_input.touch.py;
+
+        /* Bouton <- Prec (X=14 a 94, Y=36 a 56) */
+        if (tx >= 14 && tx <= 94 && ty >= 36 && ty <= 56) {
+            RepeatMode saved = g_playlist.repeat;
+            if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
+            int n = pl_prev(&g_playlist);
+            g_playlist.repeat = saved;
+            if (n >= 0) play_current_track();
+        }
+        /* Bouton Pause/Play (X=110 a 190, Y=36 a 56) */
+        else if (tx >= 110 && tx <= 190 && ty >= 36 && ty <= 56) {
+            audio_toggle_pause();
+        }
+        /* Bouton Suiv -> (X=222 a 302, Y=36 a 56) */
+        else if (tx >= 222 && tx <= 302 && ty >= 36 && ty <= 56) {
+            RepeatMode saved = g_playlist.repeat;
+            if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
+            int n = pl_next(&g_playlist);
+            g_playlist.repeat = saved;
+            if (n >= 0) play_current_track();
+            else        audio_stop();
+        }
+    }
 
     /* Auto-avance */
     if (audio_is_finished()) {
@@ -225,6 +442,64 @@ static void input_playlist(void)
     u32 kd   = g_input.down;
     u32 held = g_input.held;
     int vis  = (BOT_HEIGHT - 30) / 22;
+
+    /* ── Tactile playlist ────────────────────────────────────
+       Chaque ligne : Y = 30 + (i - scroll) * 22, H = 22
+       Toucher une ligne = sélectionner
+       Toucher ligne déjà sélectionnée = lancer la lecture */
+    /* Flèches maintenues → défilement continu */
+    if (g_input.touch_held) {
+        int tx = g_input.touch.px;
+        int ty = g_input.touch.py;
+        if (tx >= 300 && tx <= 320 && ty >= 30 && ty <= 52) {
+            if (touch_arrow_tick(true)) {
+                if (g_playlist.selected > 0) {
+                    g_playlist.selected--;
+                    if (g_playlist.selected < g_playlist.scroll_offset)
+                        g_playlist.scroll_offset--;
+                }
+            }
+        } else if (tx >= 300 && tx <= 320 && ty >= 218 && ty <= 240) {
+            if (touch_arrow_tick(false)) {
+                if (g_playlist.selected < g_playlist.count - 1) {
+                    g_playlist.selected++;
+                    if (g_playlist.selected >= g_playlist.scroll_offset + vis)
+                        g_playlist.scroll_offset++;
+                }
+            }
+        } else if (!g_input.touch_down) {
+            touch_arrow_reset();
+        }
+    }
+    if (!g_input.touch_held) touch_arrow_reset();
+
+    /* Tap sur liste */
+    if (g_input.touch_down) {
+        int tx = g_input.touch.px;
+        int ty = g_input.touch.py;
+
+        /* Zone liste : Y >= 30, X < 300 */
+        if (ty >= 30 && tx < 300) {
+            int row = (ty - 30) / 22;
+            int idx = g_playlist.scroll_offset + row;
+
+            if (idx >= 0 && idx < g_playlist.count) {
+                if (idx == g_playlist.selected) {
+                    /* Déjà sélectionné → lancer lecture */
+                    pl_jump(&g_playlist, idx);
+                    play_current_track();
+                } else {
+                    /* Sélectionner */
+                    g_playlist.selected = idx;
+                    if (g_playlist.selected < g_playlist.scroll_offset)
+                        g_playlist.scroll_offset = g_playlist.selected;
+                    if (g_playlist.selected >= g_playlist.scroll_offset + vis)
+                        g_playlist.scroll_offset = g_playlist.selected
+                                                  - vis + 1;
+                }
+            }
+        }
+    }
 
     if (kd & KEY_DOWN && g_playlist.selected < g_playlist.count - 1) {
         g_playlist.selected++;
@@ -269,8 +544,17 @@ static void input_settings(void)
 static void input_equalizer(void)
 {
     eq_handle_input(&g_eq_band, g_input.down);
-    if (g_input.down & KEY_B)     g_state = STATE_SETTINGS;
-    if (g_input.down & KEY_START) g_state = STATE_PLAYER;
+
+    /* Sauvegarder quand on quitte */
+    if (g_input.down & KEY_B || g_input.down & KEY_START) {
+        for (int i = 0; i < EQ_BANDS; i++)
+            g_settings.eq_gains[i] = audio_eq_get_gain(i);
+        settings_save();
+        g_state = (g_input.down & KEY_B) ? STATE_SETTINGS : STATE_PLAYER;
+        return;
+    }
+
+    /* Sync en temps reel */
     for (int i = 0; i < EQ_BANDS; i++)
         g_settings.eq_gains[i] = audio_eq_get_gain(i);
 }
@@ -293,8 +577,8 @@ static void draw_frame(float dt)
         C2D_Text tx;
         C2D_TextParse(&tx, load_tb, "Chargement...");
         C2D_TextOptimize(&tx);
-        C2D_DrawText(&tx, C2D_AlignLeft|C2D_WithColor,
-            140, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
+        C2D_DrawText(&tx, C2D_AlignCenter|C2D_WithColor,
+            200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
 
         C2D_TargetClear(g_bot, current_theme->bg_primary);
         C2D_SceneBegin(g_bot);
@@ -302,15 +586,59 @@ static void draw_frame(float dt)
         return;
     }
 
-    /* Top screen */
+    /* Slider 3D (0.0 = plat, 1.0 = max relief) */
+    float iod = osGet3DSliderState() * 6.f;
+
+    /* ── Oeil GAUCHE (rendu principal) ── */
     C2D_TargetClear(g_top, current_theme->bg_primary);
     C2D_SceneBegin(g_top);
-    switch (g_state) {
-        case STATE_FILE_BROWSER: fb_draw_top(&g_browser);                          break;
-        case STATE_PLAYER:       player_ui_draw_top(&g_player_ui, meta, &g_playlist); break;
-        case STATE_PLAYLIST:     pl_draw_top(&g_playlist);                         break;
-        case STATE_SETTINGS:     settings_draw_top();                              break;
-        case STATE_EQUALIZER:    eq_draw_top(g_eq_band);                           break;
+
+    if (g_loading) {
+        static C2D_TextBuf load_tb = NULL;
+        if (!load_tb) load_tb = C2D_TextBufNew(64);
+        C2D_TextBufClear(load_tb);
+        C2D_Text tx;
+        C2D_TextParse(&tx, load_tb, "Chargement...");
+        C2D_TextOptimize(&tx);
+        C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, current_theme->bg_primary);
+        C2D_DrawText(&tx, C2D_AlignCenter|C2D_WithColor,
+            200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
+    } else {
+        g_3d_iod = iod;
+        g_3d_eye = 0; /* oeil gauche */
+        switch (g_state) {
+            case STATE_FILE_BROWSER: fb_draw_top(&g_browser);                             break;
+            case STATE_PLAYER:       player_ui_draw_top(&g_player_ui, meta, &g_playlist); break;
+            case STATE_PLAYLIST:     pl_draw_top(&g_playlist);                            break;
+            case STATE_SETTINGS:     settings_draw_top();                                 break;
+            case STATE_EQUALIZER:    eq_draw_top(g_eq_band);                              break;
+        }
+    }
+
+    /* ── Oeil DROIT (decale pour effet 3D) ── */
+    if (iod > 0.f && g_top_right) {
+        C2D_TargetClear(g_top_right, current_theme->bg_primary);
+        C2D_SceneBegin(g_top_right);
+        if (g_loading) {
+            static C2D_TextBuf load_tb_r = NULL;
+            if (!load_tb_r) load_tb_r = C2D_TextBufNew(64);
+            C2D_TextBufClear(load_tb_r);
+            C2D_Text tx_r;
+            C2D_TextParse(&tx_r, load_tb_r, "Chargement...");
+            C2D_TextOptimize(&tx_r);
+            C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, current_theme->bg_primary);
+            C2D_DrawText(&tx_r, C2D_AlignCenter|C2D_WithColor,
+                200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
+        } else if (!g_loading) {
+            g_3d_eye = 1; /* oeil droit */
+            switch (g_state) {
+                case STATE_FILE_BROWSER: fb_draw_top(&g_browser);                             break;
+                case STATE_PLAYER:       player_ui_draw_top(&g_player_ui, meta, &g_playlist); break;
+                case STATE_PLAYLIST:     pl_draw_top(&g_playlist);                            break;
+                case STATE_SETTINGS:     settings_draw_top();                                 break;
+                case STATE_EQUALIZER:    eq_draw_top(g_eq_band);                              break;
+            }
+        }
     }
 
     /* Bottom screen */
@@ -326,6 +654,41 @@ static void draw_frame(float dt)
 
     C3D_FrameEnd(0);
     (void)dt;
+}
+
+/* ── Thread navigation fichiers (evite lag audio) ─────────── */
+static volatile bool g_browser_loading = false;
+static char s_nav_path[512] = {0};
+static bool s_nav_go_up = false;
+
+static void nav_thread_func(void *arg)
+{
+    (void)arg;
+    if (s_nav_go_up)
+        fb_go_up(&g_browser);
+    else
+        fb_enter_dir(&g_browser, s_nav_path);
+
+    g_browser_loading = false;
+}
+
+static void nav_enter(const char *path)
+{
+    if (g_browser_loading) return;  // ignore si déjà en cours
+    g_browser_loading = true;
+    s_nav_go_up = false;
+    strncpy(s_nav_path, path, 511);
+    s_nav_path[511] = '\0';
+    // Priorité basse (0x3F) pour ne pas perturber l'audio (0x18)
+    threadCreate(nav_thread_func, NULL, 16*1024, 0x3F, -1, true);
+}
+
+static void nav_go_up(void)
+{
+    if (g_browser_loading) return;
+    g_browser_loading = true;
+    s_nav_go_up = true;
+    threadCreate(nav_thread_func, NULL, 16*1024, 0x3F, -1, true);
 }
 
 /* ── Thread d init SD ────────────────────────────────────── */
@@ -419,7 +782,9 @@ int main(int argc, char *argv[])
     /* ── 3. Render targets ────────────────────────────────── */
     g_top = C2D_CreateScreenTarget(GFX_TOP,    GFX_LEFT);
     g_bot = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
-    if (!g_top || !g_bot) {
+    g_top_right = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
+    gfxSet3D(true); /* Activer 3D stereoscopique */
+    if (!g_top || !g_bot || !g_top_right) {
         dbg("ERREUR: render targets failed");
         C2D_Fini(); C3D_Fini(); gfxExit(); romfsExit(); return 1;
     }
@@ -435,6 +800,7 @@ int main(int argc, char *argv[])
     /* ── 5. Thème & settings ──────────────────────────────── */
     theme_init();
     settings_load();
+    fav_load();
     theme_set(theme_get(g_settings.theme_index));
     dbg("step 5: theme+settings ok");
 
@@ -470,6 +836,8 @@ int main(int argc, char *argv[])
         g_settings.start_dir[0] ? g_settings.start_dir : "sdmc:/Music",
         MAX_PATH-1);
 
+    /* Restaurer viz_style sauvegardé */
+    g_player_ui.viz_style = g_settings.viz_style;
     dbg("step 7: UI ok");
 
     /* ── 8. Thread d init SD (scan en arriere-plan) ─────── */
@@ -513,27 +881,55 @@ int main(int argc, char *argv[])
             }
         }
 
-        switch (g_state) {
-            case STATE_FILE_BROWSER: input_file_browser(); break;
-            case STATE_PLAYER:       input_player();       break;
-            case STATE_PLAYLIST:     input_playlist();     break;
-            case STATE_SETTINGS:     input_settings();     break;
-            case STATE_EQUALIZER:    input_equalizer();    break;
+        /* Bloquer inputs pendant chargement */
+        if (!g_loading && !g_browser_loading) {
+            switch (g_state) {
+                case STATE_FILE_BROWSER: input_file_browser(); break;
+                case STATE_PLAYER:       input_player();       break;
+                case STATE_PLAYLIST:     input_playlist();     break;
+                case STATE_SETTINGS:     input_settings();     break;
+                case STATE_EQUALIZER:    input_equalizer();    break;
+            }
         }
+
+        /* Synchroniser shuffle/repeat depuis settings vers playlist */
+        if (g_playlist.shuffle != g_settings.shuffle) {
+            g_playlist.shuffle = g_settings.shuffle;
+            if (g_settings.shuffle) pl_rebuild_shuffle(&g_playlist);
+        }
+        if ((int)g_playlist.repeat != g_settings.repeat)
+            g_playlist.repeat = (RepeatMode)g_settings.repeat;
+
+        /* Sync viz_style settings -> player_ui en temps reel */
+        if (g_player_ui.viz_style != g_settings.viz_style)
+            g_player_ui.viz_style = g_settings.viz_style;
 
         player_ui_update(&g_player_ui, audio_get_metadata(), dt);
 
-        /* Sauvegarde périodique (toutes ~5s à 60fps) */
-        if (++save_timer > 600) {
+        /* Sauvegarde toutes les 2 min en arriere-plan */
+        if (++save_timer > 7200) { /* 2 min a 60fps */
             save_timer = 0;
             if (audio_get_state() == AUDIO_PLAYING) {
                 g_settings.last_position = audio_get_position();
                 g_settings.last_track    = g_playlist.current;
+                /* settings_save() est deja async (thread detache) */
+                /* donc pas de freeze sur le thread principal */
                 settings_save();
             }
         }
 
         draw_frame(dt);
+
+        /* Limiteur FPS adaptatif :
+           - 48000Hz en cours → limiter à 30fps (33ms) pour laisser CPU au resampling
+           - 44100Hz natif   → limiter à 60fps (16ms) */
+        u64 frame_end = osGetTime();
+        u64 frame_ms  = frame_end - now;
+        extern u32 audio_get_sample_rate(void);
+        u32 sr = audio_get_sample_rate();
+        u64 target_ms = (sr != 0 && sr != 44100) ? 33 : 16;
+        if (frame_ms < target_ms)
+            svcSleepThread((target_ms - frame_ms) * 1000000LL);
     }
 
     /* ── Nettoyage (UNE SEULE FOIS chaque service) ────────── */
