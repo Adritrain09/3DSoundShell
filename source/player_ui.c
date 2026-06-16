@@ -716,7 +716,7 @@ void player_ui_draw_bottom(PlayerUI *ui, const AudioMetadata *meta,
         pct <= 20 ? th->accent2 : th->text_disabled, bstr);
 
     // Indication seek tactile (simple texte, pas de barre)
-    draw_text(100, 224, 0.42f, th->text_disabled, "< glisser ici pour avancer >");
+    draw_text(90, 224, 0.42f, th->text_disabled, "< glisser ici pour avancer >");
 
     // Boutons principaux
     float by = 36;
