@@ -10,6 +10,7 @@ typedef enum {
     VIZ_BARS,
     VIZ_WAVE,
     VIZ_CIRCLE,
+    VIZ_EQ,
     VIZ_COUNT
 } VisualizerStyle;
 
@@ -21,6 +22,7 @@ typedef struct {
     int               cover_tex_id;
     bool              cover_loaded;
     float             scroll_title_x;
+    int               scroll_pause_timer;
     u64               last_tick;
     C3D_Tex           cover_tex;
     Tex3DS_SubTexture cover_subtex;

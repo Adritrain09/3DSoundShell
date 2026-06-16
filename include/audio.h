@@ -67,6 +67,7 @@ const AudioMetadata *audio_get_metadata(void);
 
 // Visualizer (returns amplitude per band, 0.0-1.0)
 void  audio_get_visualizer(float out[EQ_BANDS]);
+void  audio_get_visualizer_fft(float out[EQ_BANDS]);
 
 // Equalizer
 void  audio_eq_set_gain(int band, float db);

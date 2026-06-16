@@ -37,6 +37,11 @@ typedef struct {
     // Equalizer
     u32 eq_bar;
     u32 eq_handle;
+    u32 eq_bar_selected;
+    u32 eq_bar_positive;
+    u32 eq_bar_negative;
+    u32 eq_zero_line;
+    u32 eq_bg;
 } Theme;
 
 // ─── Built-in themes ──────────────────────────────────────────

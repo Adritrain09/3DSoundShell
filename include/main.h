@@ -34,3 +34,7 @@ typedef enum {
 
 // ─── Supported extensions ─────────────────────────────────────
 #define SUPPORTED_EXTS "mp3|ogg|wav|flac|aac|m4a|mp2|opus|wma|aiff"
+
+// ─── TextBuf global partagé ───────────────────────────────────
+extern C2D_TextBuf g_textbuf;
+void g_textbuf_init(void);
