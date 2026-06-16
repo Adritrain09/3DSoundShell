@@ -30,7 +30,7 @@ README généré par claude.ai et modifié par.. bas.. moi:
 | **◀** | Piste précédente |
 | **▶** | Piste suivante |
 | **▲ / ▼** | Volume + / - |
-| **ZL / ZR** | Reculer / Avancer 10 secondes (New3DS) |
+| **ZL / ZR** | Reculer / Avancer 10 secondes (New modèle) |
 | **A** | Confirmer / Entrer dans le dossier |
 | **B** | Retour / Remonter dans les dossiers |
 | **X** | Ajouter à la playlist |
