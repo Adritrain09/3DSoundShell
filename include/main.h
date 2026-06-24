@@ -1,5 +1,15 @@
 #pragma once
 
+// ─── Update check ─────────────────────────────────────────
+#define VERSION_URL "http://copyparty.hosten.uk/Publique-Adri/version.txt?raw"
+extern char g_latest_version[16];
+extern bool g_update_available;
+extern int  g_update_notif_timer;
+void update_check_start(void);
+
+// ─── Version ──────────────────────────────────────────────
+#define APP_VERSION "0.91"
+
 #include <3ds.h>
 #include <citro2d.h>
 #include <citro3d.h>

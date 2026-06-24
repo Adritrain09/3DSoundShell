@@ -11,11 +11,11 @@ typedef struct {
     char name[64];
 
     // Backgrounds
-    u32 bg_primary;       // Main background
-    u32 bg_secondary;     // Panel / card background
-    u32 bg_header;        // Top bar
-    u32 bg_selected;      // Selected item highlight
-    u32 bg_playing;       // Currently playing item
+    u32 bg_primary;
+    u32 bg_secondary;
+    u32 bg_header;
+    u32 bg_selected;
+    u32 bg_playing;
 
     // Text
     u32 text_primary;
@@ -24,15 +24,15 @@ typedef struct {
     u32 text_disabled;
 
     // UI elements
-    u32 accent;           // Main accent color
-    u32 accent2;          // Secondary accent
-    u32 border;           // Borders / separators
+    u32 accent;
+    u32 accent2;
+    u32 border;
     u32 scrollbar;
 
     // Player
     u32 progress_bg;
     u32 progress_fill;
-    u32 visualizer_bars[8]; // Gradient colors for visualizer
+    u32 visualizer_bars[8];
 
     // Equalizer
     u32 eq_bar;
@@ -44,29 +44,30 @@ typedef struct {
     u32 eq_bg;
 } Theme;
 
+// ─── Max thèmes custom depuis SD ──────────────────────────────
+#define MAX_CUSTOM_THEMES 16
+#define THEMES_DIR "sdmc:/3DSoundShell/themes"
+
 // ─── Built-in themes ──────────────────────────────────────────
 extern Theme theme_dark;
 extern Theme theme_light;
 extern Theme theme_purple;
 extern Theme theme_forest;
-extern Theme theme_custom;
-extern bool theme_custom_loaded;
 
 // ─── Active theme ─────────────────────────────────────────────
 extern Theme *current_theme;
 
-/* Buffer texte global */
-#include <citro2d.h>
+// ─── TextBuf global ───────────────────────────────────────────
 extern C2D_TextBuf g_textbuf;
 void g_textbuf_init(void);
 void g_textbuf_exit(void);
 
-void theme_init(void);
-void theme_set(Theme *t);
-bool theme_load_from_file(const char *path, Theme *out);
-void theme_save_to_file(const char *path, const Theme *t);
-bool theme_load_custom(void);
-bool theme_has_custom(void);
-int  theme_count(void);
-Theme *theme_get(int index);
+// ─── API ──────────────────────────────────────────────────────
+void        theme_init(void);
+void        theme_set(Theme *t);
+bool        theme_load_from_file(const char *path, Theme *out);
+void        theme_save_to_file(const char *path, const Theme *t);
+int         theme_count(void);
+Theme      *theme_get(int index);
 const char *theme_name(int index);
+void        theme_scan_custom(void);
