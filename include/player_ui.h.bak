@@ -11,6 +11,7 @@ typedef enum {
     VIZ_WAVE,
     VIZ_CIRCLE,
     VIZ_FIRE,
+    VIZ_RAIN,
     VIZ_EQ,
     VIZ_COUNT
 } VisualizerStyle;

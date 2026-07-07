@@ -20,6 +20,7 @@ typedef struct {
     bool          shuffle;
     RepeatMode    repeat;
     int           shuffle_order[MAX_PLAYLIST]; // permutation
+    bool          use_favorites; // mode favoris
 } Playlist;
 
 void pl_init(Playlist *pl);
@@ -27,6 +28,7 @@ void pl_add(Playlist *pl, const char *path, const char *title);
 void pl_add_dir(Playlist *pl, const char *dir_path);
 void pl_remove(Playlist *pl, int index);
 void pl_clear(Playlist *pl);
+void pl_load_favorites(Playlist *pl);
 
 // Navigation
 int  pl_next(Playlist *pl);     // returns new index, -1 if end

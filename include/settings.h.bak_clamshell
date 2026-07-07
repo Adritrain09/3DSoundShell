@@ -31,9 +31,6 @@ typedef struct {
 
     // Vitesse lecture
     float   playback_speed; // 0.5 a 2.0
-
-    // LED notification (utilise couleur du theme)
-    bool    led_enabled;
 } Settings;
 
 extern Settings g_settings;

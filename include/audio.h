@@ -57,6 +57,7 @@ int    audio_get_duration(void);
 float  audio_get_position_pct(void);
 
 void   audio_set_volume(float vol); // 0.0 - 1.0
+void   audio_set_speed(float speed);  // 0.5 - 2.0
 float  audio_get_volume(void);
 
 AudioState audio_get_state(void);

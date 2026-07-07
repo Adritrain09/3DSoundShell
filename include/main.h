@@ -5,10 +5,12 @@
 extern char g_latest_version[16];
 extern bool g_update_available;
 extern int  g_update_notif_timer;
+extern bool g_is_new3ds;
 void update_check_start(void);
+void draw_update_notif_timed(void); /* affiche notif MAJ si timer actif */
 
 // ─── Version ──────────────────────────────────────────────
-#define APP_VERSION "0.91"
+#define APP_VERSION "0.93"
 
 #include <3ds.h>
 #include <citro2d.h>

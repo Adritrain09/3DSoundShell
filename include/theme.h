@@ -42,6 +42,9 @@ typedef struct {
     u32 eq_bar_negative;
     u32 eq_zero_line;
     u32 eq_bg;
+
+    // LED clamshell (couleur de la LED notification quand console fermee)
+    u32 led_color;
 } Theme;
 
 // ─── Max thèmes custom depuis SD ──────────────────────────────
