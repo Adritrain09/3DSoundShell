@@ -199,32 +199,33 @@ static void fmt_time(char *out, int sec)
 // ============================================================
 // VISUALISEUR MODE "FEU" — effet flamme avec couleurs du theme
 //
-// TOUTE la barre change de couleur selon sa hauteur (heat)
 // Utilise les 8 couleurs du theme (visualizer_bars[0..7])
+// pour un degrade ultra fluide :
+//   - bars[0] = couleur la plus basse (vis_start)
+//   - bars[7] = couleur la plus haute (vis_end)
 //
-// REGLAGES :
-//   FIRE_BOOST   = sensibilite (2.5 = bien reactif)
-//   FIRE_MAX_HEAT = hauteur a laquelle vis_end est atteint
-//     1.0  = vis_end atteint a 100% (saturation max)
-//     0.75 = vis_end atteint a 75% (atteint plus tot)
-//     0.6  = vis_end atteint a 60% (encore plus tot)
+// SENSIBILITE :
+//   FIRE_BOOST = facteur d amplification de la hauteur
+//     1.0 = normal (peu reactif)
+//     2.0 = bien reactif
+//     3.0 = tres reactif (peut saturer)
 // ============================================================
-#define FIRE_COLS     16
-#define FIRE_BOOST    1.8f
-#define FIRE_MAX_HEAT 0.90f  /* vis_end atteint a 90% de hauteur */
+#define FIRE_COLS  16
+#define FIRE_BOOST 2.5f   /* sensibilite : augmente la hauteur des barres */
 
 static float s_fire_h[FIRE_COLS]    = {0};
 static float s_fire_peak[FIRE_COLS] = {0};
 
 /* Recupere couleur interpolee dans le degrade du theme
-   pos = 0.0 (vis_start) a 1.0 (vis_end) */
+   pos = 0.0 (bas/vis_start) a 1.0 (haut/vis_end) */
 static void fire_get_color(const Theme *th, float pos,
                            u8 *R, u8 *G, u8 *B)
 {
     if (pos < 0.f) pos = 0.f;
     if (pos > 1.f) pos = 1.f;
 
-    float fi = pos * 7.f;
+    /* Index flottant dans les 8 couleurs */
+    float fi = pos * 7.f;       /* 0.0 a 7.0 */
     int   i0 = (int)fi;
     if (i0 >= 7) i0 = 6;
     int   i1 = i0 + 1;
@@ -252,7 +253,7 @@ static void draw_viz_fire(const PlayerUI *ui, float x, float y,
 
     for (int c = 0; c < FIRE_COLS; c++) {
         int band = c * EQ_BANDS / FIRE_COLS;
-        float energy = ui->viz_smooth[band] * FIRE_BOOST;
+        float energy = ui->viz_smooth[band] * FIRE_BOOST;  /* boost sensibilite */
         if (energy > 1.f) energy = 1.f;
 
         /* Lissage : monte vite, descend lentement */
@@ -266,22 +267,33 @@ static void draw_viz_fire(const PlayerUI *ui, float x, float y,
             s_fire_peak[c] -= 0.003f;
         if (s_fire_peak[c] < 0.f) s_fire_peak[c] = 0.f;
 
-        float heat = s_fire_h[c];
+        float heat = s_fire_h[c];  /* 0.0 a 1.0 */
         float bh = heat * h;
         if (bh < 2.f) bh = 2.f;
         float bx = x + c * (bw + 1.f);
         float by = y + h - bh;
 
-        /* Position dans le degrade : heat / FIRE_MAX_HEAT
-           Ainsi vis_end (pos=1.0) est atteint quand heat = FIRE_MAX_HEAT */
-        float color_pos = heat / FIRE_MAX_HEAT;
-        if (color_pos > 1.f) color_pos = 1.f;
+        /* Couleur EN HAUT de la barre = couleur correspondant a heat
+           Une grosse barre atteint vis_end, une petite reste pres de vis_start */
+        u8 topR, topG, topB;
+        fire_get_color(th, heat, &topR, &topG, &topB);
 
-        u8 R, G, B;
-        fire_get_color(th, color_pos, &R, &G, &B);
+        /* Couleur en BAS de la barre = toujours vis_start */
+        u8 botR, botG, botB;
+        fire_get_color(th, 0.f, &botR, &botG, &botB);
 
-        /* TOUTE la barre dans la meme couleur (effet feu classique) */
-        draw_rect(bx, by, bw, bh, RGBA8(R, G, B, 240));
+        /* Dessin avec degrade vertical lisse (16 tranches) */
+        int slices = 16;
+        float slice_h = bh / slices;
+        for (int s = 0; s < slices; s++) {
+            float t = (float)s / (float)(slices - 1);
+            /* Interpolation entre couleur du bas et couleur du haut de cette barre */
+            u8 sR = (u8)(botR + (topR - botR) * t);
+            u8 sG = (u8)(botG + (topG - botG) * t);
+            u8 sB = (u8)(botB + (topB - botB) * t);
+            float sy = by + (slices - 1 - s) * slice_h;
+            draw_rect(bx, sy, bw, slice_h + 1.f, RGBA8(sR, sG, sB, 240));
+        }
 
         /* Peak indicator blanc */
         if (s_fire_peak[c] > 0.05f) {
@@ -289,8 +301,8 @@ static void draw_viz_fire(const PlayerUI *ui, float x, float y,
             draw_rect(bx, py, bw, 2.f, RGBA8(255, 255, 255, 220));
         }
 
-        /* Reflet sol */
-        draw_rect(bx, y + h, bw, bh * 0.12f, RGBA8(R, G, B, 60));
+        /* Reflet sol (couleur basse) */
+        draw_rect(bx, y + h, bw, bh * 0.12f, RGBA8(botR, botG, botB, 60));
     }
     (void)th;
 }

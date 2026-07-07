@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -756,331 +755,6 @@ static void init_thread_func(void *arg)
     dbg("init_thread: done");
 }
 
-
-/* ============================================================
-   SPLASH SCREEN — CONTINUATION DU LOGO BCMA
-   Duree totale : 2 secondes
-   
-   Phase 1 (0.0 - 0.4s) : Ecran NOIR + "3DSOUNDSHELL" statique
-                          = transition douce depuis le logo BCMA
-   Phase 2 (0.4 - 1.5s) : EQ + particules apparaissent autour du texte
-   Phase 3 (1.5 - 2.0s) : Fade out vers le file browser
-   ============================================================ */
-typedef struct {
-    float x, y;
-    float vx, vy;
-    float life;
-    u8 r, g, b;
-} SplashParticle;
-
-#define SP_PARTICLES 35
-
-static void draw_splash_screen(void)
-{
-    static C2D_TextBuf splash_tb = NULL;
-    if (!splash_tb) splash_tb = C2D_TextBufNew(512);
-
-    const int   SPLASH_FRAMES = 60;  /* 2s a 60fps */
-    const int   NUM_BARS      = 20;
-    float       bar_heights[20] = {0};
-    float       bar_targets[20];
-    SplashParticle particles[SP_PARTICLES];
-
-    Theme *th = current_theme;
-
-    /* Init barres EQ */
-    for (int i = 0; i < NUM_BARS; i++)
-        bar_targets[i] = 0.3f + (float)(rand() % 70) / 100.f;
-
-    /* Init particules */
-    for (int i = 0; i < SP_PARTICLES; i++) {
-        particles[i].x = (float)(rand() % TOP_WIDTH);
-        particles[i].y = (float)TOP_HEIGHT + (float)(rand() % 50);
-        particles[i].vx = ((float)(rand() % 20) - 10.f) * 0.05f;
-        particles[i].vy = -0.4f - (float)(rand() % 20) / 50.f;
-        particles[i].life = (float)(rand() % 100) / 100.f;
-        u32 col = th->visualizer_bars[rand() % 8];
-        particles[i].r = (col >> 0)  & 0xff;
-        particles[i].g = (col >> 8)  & 0xff;
-        particles[i].b = (col >> 16) & 0xff;
-    }
-
-    for (int frame = 0; frame < SPLASH_FRAMES; frame++) {
-        if (!aptMainLoop()) return;
-        hidScanInput();
-        if (hidKeysDown() & (KEY_START | KEY_A | KEY_B)) return;
-
-        float t = (float)frame / (float)SPLASH_FRAMES;
-
-        /* Phases :
-           0.0  - 0.4  : Texte 3DSOUNDSHELL deja visible (transition BCMA)
-           0.2  - 0.75 : EQ + particules apparaissent
-           0.8  - 1.0  : Fade out global */
-        float text_alpha = 1.f;
-        float eq_alpha   = 0.f;
-        float fadeout    = 1.f;
-
-        if (t > 0.2f && t < 0.75f) eq_alpha = (t - 0.2f) / 0.55f;
-        else if (t >= 0.75f)       eq_alpha = 1.f;
-
-        if (t > 0.8f) fadeout = 1.f - (t - 0.8f) / 0.2f;
-
-        /* Update particules */
-        for (int i = 0; i < SP_PARTICLES; i++) {
-            particles[i].x += particles[i].vx;
-            particles[i].y += particles[i].vy;
-            particles[i].life -= 0.006f;
-            if (particles[i].y < -10.f || particles[i].life <= 0.f) {
-                particles[i].x = (float)(rand() % TOP_WIDTH);
-                particles[i].y = (float)TOP_HEIGHT + 10.f;
-                particles[i].life = 1.f;
-            }
-        }
-
-        /* Update barres EQ */
-        for (int i = 0; i < NUM_BARS; i++) {
-            float target = bar_targets[i] * eq_alpha
-                         * (0.6f + 0.4f * sinf((float)frame * 0.15f + i * 0.5f));
-            bar_heights[i] += (target - bar_heights[i]) * 0.2f;
-        }
-
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-
-        /* ===== ECRAN HAUT ===== */
-        C2D_TargetClear(g_top, C2D_Color32(0, 0, 0, 255));
-        C2D_SceneBegin(g_top);
-
-        /* Fond noir profond (transition douce depuis BCMA) */
-        C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT,
-            C2D_Color32(0, 0, 0, 255));
-
-        /* Particules en fond */
-        for (int i = 0; i < SP_PARTICLES; i++) {
-            u8 pa = (u8)(180 * particles[i].life * eq_alpha * fadeout);
-            C2D_DrawRectSolid(particles[i].x, particles[i].y, 0, 2, 2,
-                C2D_Color32(particles[i].r, particles[i].g, particles[i].b, pa));
-        }
-
-        /* Barres EQ AUTOUR du texte (en bas) */
-        float bar_area_y = 145;
-        float bar_area_h = 60;
-        float bar_w      = 13.f;
-        float bar_gap    = 3.f;
-        float total_w    = NUM_BARS * (bar_w + bar_gap) - bar_gap;
-        float start_x    = (TOP_WIDTH - total_w) / 2.f;
-
-        for (int i = 0; i < NUM_BARS; i++) {
-            float bx = start_x + i * (bar_w + bar_gap);
-            float bh = bar_heights[i] * bar_area_h;
-            float by = bar_area_y + bar_area_h - bh;
-
-            u32 col = th->visualizer_bars[i * 8 / NUM_BARS];
-            u8 r = (col >> 0)  & 0xff;
-            u8 g = (col >> 8)  & 0xff;
-            u8 b = (col >> 16) & 0xff;
-            u8 a = (u8)(220 * fadeout);
-
-            C2D_DrawRectSolid(bx, by, 0, bar_w, bh, C2D_Color32(r, g, b, a));
-
-            /* Glow en haut de barre */
-            C2D_DrawRectSolid(bx - 1, by - 2, 0, bar_w + 2, 4,
-                C2D_Color32(r, g, b, (u8)(80 * fadeout)));
-
-            /* Reflet sol */
-            C2D_DrawRectSolid(bx, bar_area_y + bar_area_h, 0,
-                bar_w, bh * 0.25f, C2D_Color32(r, g, b, (u8)(60 * fadeout)));
-        }
-
-        /* LOGO "3DSOUNDSHELL" - GROS, CENTRE, BLANC sur NOIR
-           Position fixe pour continuite avec le BCMA */
-        C2D_TextBufClear(splash_tb);
-        C2D_Text tx;
-        C2D_TextParse(&tx, splash_tb, "3DSOUNDSHELL");
-        C2D_TextOptimize(&tx);
-        u8 alpha = (u8)(255 * text_alpha * fadeout);
-
-        /* Effet glow autour du texte (4 directions) */
-        u32 glow_col = C2D_Color32(180, 200, 255,
-            (u8)(80 * text_alpha * fadeout));
-        float glow_offsets[][2] = {{-2,-2},{2,-2},{-2,2},{2,2}};
-        for (int gi = 0; gi < 4; gi++) {
-            C2D_DrawText(&tx, C2D_AlignCenter | C2D_WithColor,
-                TOP_WIDTH/2.f + glow_offsets[gi][0], 95 + glow_offsets[gi][1],
-                0, 0.85f, 0.85f, glow_col);
-        }
-
-        /* Texte BLANC principal */
-        u32 white = C2D_Color32(255, 255, 255, alpha);
-        C2D_DrawText(&tx, C2D_AlignCenter | C2D_WithColor,
-            TOP_WIDTH/2.f, 95, 0, 0.85f, 0.85f, white);
-
-        /* MAJ disponible : affiche "Nouvelle version disponible !" */
-        if (g_update_available && g_latest_version[0]) {
-            C2D_TextBufClear(splash_tb);
-            C2D_Text tx_maj;
-            char maj_str[64];
-            snprintf(maj_str, 64, "Nouvelle version V%s disponible !",
-                g_latest_version);
-            C2D_TextParse(&tx_maj, splash_tb, maj_str);
-            C2D_TextOptimize(&tx_maj);
-            u8 maj_a = (u8)(220 * eq_alpha * fadeout);
-            u32 maj_col = C2D_Color32(255, 200, 80, maj_a);
-            C2D_DrawText(&tx_maj, C2D_AlignCenter | C2D_WithColor,
-                TOP_WIDTH/2.f, 220, 0, 0.45f, 0.45f, maj_col);
-        }
-
-        /* ===== ECRAN BAS ===== */
-        C2D_TargetClear(g_bot, C2D_Color32(0, 0, 0, 255));
-        C2D_SceneBegin(g_bot);
-        C2D_DrawRectSolid(0, 0, 0, BOT_WIDTH, BOT_HEIGHT,
-            C2D_Color32(0, 0, 0, 255));
-
-        /* Hint discret */
-        if (eq_alpha > 0.3f && fadeout > 0.5f) {
-            C2D_TextBufClear(splash_tb);
-            C2D_Text tx2;
-            C2D_TextParse(&tx2, splash_tb, "START pour passer");
-            C2D_TextOptimize(&tx2);
-            u8 hint_a = (u8)(80 * fadeout);
-            u32 hint_col = C2D_Color32(100, 100, 120, hint_a);
-            C2D_DrawText(&tx2, C2D_AlignCenter | C2D_WithColor,
-                BOT_WIDTH/2.f, 220, 0, 0.40f, 0.40f, hint_col);
-        }
-
-        C3D_FrameEnd(0);
-    }
-}
-
-
-
-/* ============================================================
-   APT HOOK - re-applique LED apres fermeture/notification
-   ============================================================ */
-static aptHookCookie s_apt_cookie;
-static volatile bool s_force_led_refresh = false;
-
-static void apt_hook_callback(APT_HookType hook, void* param)
-{
-    (void)param;
-    switch (hook) {
-        case APTHOOK_ONWAKEUP:
-        case APTHOOK_ONRESTORE:
-            /* Console reouverte ou retour depuis HOME : refresh LED */
-            s_force_led_refresh = true;
-            break;
-        default:
-            break;
-    }
-}
-
-/* ============================================================
-   LED NOTIFICATION
-   - Utilise la couleur du theme actuel (current_theme->led_color)
-   - Pulse doucement quand l audio joue
-   - Eteinte sinon
-   ============================================================ */
-static bool s_led_active = false;
-static u64  s_led_last_check = 0;
-static u32  s_led_last_color = 0;
-
-static void update_led(void)
-{
-    u64 now = osGetTime();
-
-    /* Si refresh force (wakeup/restore), reset l etat */
-    if (s_force_led_refresh) {
-        s_force_led_refresh = false;
-        s_led_active = false;  /* Force la re-application */
-        s_led_last_check = 0;
-    }
-
-    /* Check toutes les 500ms */
-    if (now - s_led_last_check < 500) return;
-    s_led_last_check = now;
-
-    /* Etat desire */
-    bool should_be_on = false;
-    if (g_settings.led_enabled) {
-        AudioState st = audio_get_state();
-        if (st == AUDIO_PLAYING) should_be_on = true;
-    }
-
-    /* === DETECTION DES NOTIFICATIONS SYSTEME ===
-       On lit l etat actuel de la LED via MCUHWC_ReadRegister
-       Si une notification est en cours, on attend qu elle finisse */
-    static u32 s_notif_wait_until = 0;
-    static bool s_was_notif_active = false;
-
-    if (should_be_on) {
-        /* Lire l etat actuel de la LED (registre 0x2D = info LED state) */
-        u8 led_state = 0;
-        Result rc = MCUHWC_ReadRegister(0x28, &led_state, 1);
-
-        /* Si une notification est detectee (LED a un pattern non-null),
-           et que ce n est PAS notre LED, on attend
-           led_state != 0 et !s_led_active = quelqu un d autre a pris la LED */
-        if (R_SUCCEEDED(rc) && led_state != 0 && !s_led_active) {
-            /* Notification active : on attend 5 sec qu elle finisse */
-            if (!s_was_notif_active) {
-                s_was_notif_active = true;
-                s_notif_wait_until = (u32)(now + 5000); /* attendre 5 sec */
-            }
-            /* Pas encore fini d attendre ? */
-            if (now < s_notif_wait_until) {
-                return; /* Skip cette frame, laisser la notif tranquille */
-            }
-            /* La notif devrait etre finie, on reprend la main */
-            s_was_notif_active = false;
-        } else {
-            s_was_notif_active = false;
-        }
-    }
-
-    /* Re-applique si la couleur du theme a change */
-    u32 cur_color = current_theme->led_color;
-    bool color_changed = (s_led_active && cur_color != s_led_last_color);
-
-    /* Re-application periodique pour reprendre apres notifications
-       (mais moins agressif maintenant : toutes les 5 sec) */
-    static u64 s_led_force_refresh_time = 0;
-    bool force_refresh = false;
-    if (should_be_on && (now - s_led_force_refresh_time >= 5000)) {
-        s_led_force_refresh_time = now;
-        force_refresh = true;
-    }
-
-    if ((should_be_on && !s_led_active) || color_changed || force_refresh) {
-        InfoLedPattern p = {0};
-        p.delay = 0x10;
-        p.smoothing = 0x40;
-        p.loopDelay = 0x00;
-        p.blinkSpeed = 0x00;
-
-        u8 base_r = (cur_color >> 0)  & 0xff;
-        u8 base_g = (cur_color >> 8)  & 0xff;
-        u8 base_b = (cur_color >> 16) & 0xff;
-
-        /* Pulsation : 32 steps sinusoidaux */
-        for (int i = 0; i < 32; i++) {
-            float t = (float)i / 32.f;
-            float intensity = 0.3f + 0.7f * (0.5f + 0.5f * sinf(t * 6.28318f));
-            p.redPattern[i]   = (u8)(base_r * intensity);
-            p.greenPattern[i] = (u8)(base_g * intensity);
-            p.bluePattern[i]  = (u8)(base_b * intensity);
-        }
-        MCUHWC_SetInfoLedPattern(&p);
-        s_led_active = true;
-        s_led_last_color = cur_color;
-    }
-    else if (!should_be_on && s_led_active) {
-        InfoLedPattern off = {0};
-        off.delay = 0x10;
-        off.loopDelay = 0xFF;
-        MCUHWC_SetInfoLedPattern(&off);
-        s_led_active = false;
-    }
-}
-
 /* ── Main ─────────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
@@ -1129,9 +803,6 @@ int main(int argc, char *argv[])
     ptmuInit();
     mcuHwcInit();
     srand((unsigned)osGetTime());
-
-    /* Enregistrer hook APT pour refresh LED apres wakeup/restore */
-    aptHook(&s_apt_cookie, apt_hook_callback, NULL);
     APT_CheckNew3DS(&g_is_new3ds); /* détection modèle une seule fois */
     dbg("step 4: services ok");
 
@@ -1181,10 +852,6 @@ int main(int argc, char *argv[])
     /* Restaurer viz_style sauvegardé */
     g_player_ui.viz_style = g_settings.viz_style;
     dbg("step 7: UI ok");
-
-    /* ── 7b. SPLASH SCREEN ANIME ───────────────────────── */
-    draw_splash_screen();
-    dbg("step 7b: splash done");
 
     /* ── 8. Thread d init SD (scan en arriere-plan) ─────── */
     static char s_init_path[512];
@@ -1252,9 +919,6 @@ int main(int argc, char *argv[])
 
         player_ui_update(&g_player_ui, audio_get_metadata(), dt);
 
-        /* Update LED notification */
-        update_led();
-
         /* Sauvegarde toutes les 2 min en arriere-plan */
         if (++save_timer > 7200) { /* 2 min a 60fps */
             save_timer = 0;
@@ -1283,17 +947,6 @@ int main(int argc, char *argv[])
     dbg("cleanup start");
     settings_save_sync();
     dbg("cleanup: save done");
-
-    /* Eteindre LED */
-    {
-        InfoLedPattern off = {0};
-        off.delay = 0x10;
-        off.loopDelay = 0xFF;
-        MCUHWC_SetInfoLedPattern(&off);
-    }
-
-    /* Retirer hook APT */
-    aptUnhook(&s_apt_cookie);
 
     player_ui_exit(&g_player_ui);
     audio_exit();

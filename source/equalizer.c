@@ -111,7 +111,7 @@ void eq_draw_top(int selected_band)
     }
 
     /* Label visualiseur */
-    draw_text(start_x-5, viz_y_base - 12, 0.36f, th->text_disabled, "NIVEAU");
+    draw_text(start_x-5, viz_y_base + 2, 0.36f, th->text_disabled, "NIVEAU");
 
     /* ── Barres EQ ── */
     for(int i=0;i<EQ_SCREEN_BANDS;i++) {
@@ -211,6 +211,9 @@ void eq_draw_bottom(int selected_band)
     draw_text(8,102,0.44f,th->text_secondary, "A    Preset suivant");
     draw_text(8,118,0.44f,th->text_secondary, "X    Tout a zero");
     draw_text(8,134,0.44f,th->text_secondary, "B    Retour");
+
+    /* Notif MAJ temporaire */
+    draw_update_notif_timed();
 
     /* Preset actif */
     extern EQPreset eq_preset_flat, eq_preset_bass_boost,

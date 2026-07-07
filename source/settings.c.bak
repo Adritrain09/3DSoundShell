@@ -41,7 +41,6 @@ static void save_thread_func(void *arg)
         fprintf(f, "last_track=%d\n",  s->last_track);
         fprintf(f, "eq_preset=%d\n",   s->eq_preset_index);
         fprintf(f, "speed=%.2f\n",     s->playback_speed);
-        fprintf(f, "led=%d\n",          s->led_enabled);
         for (int i = 0; i < 8; i++)
             fprintf(f, "eq%d=%.2f\n", i, s->eq_gains[i]);
         fclose(f);
@@ -78,7 +77,6 @@ void settings_init(void)
     g_settings.shuffle          = false;
     g_settings.repeat           = REPEAT_NONE;
     g_settings.eq_preset_index  = 0;
-    g_settings.led_enabled        = true;   /* LED ON par defaut */
     for (int i = 0; i < 8; i++) g_settings.eq_gains[i] = 0;
     strncpy(g_settings.start_dir, "sdmc:/Music", 511);
 
@@ -119,7 +117,6 @@ void settings_load(void)
             continue; }
         if (sscanf(line,"last_track=%d",&ival)==1){ g_settings.last_track=ival;        continue; }
         if (sscanf(line,"eq_preset=%d",&ival)==1) { g_settings.eq_preset_index=ival;   continue; }
-        if (sscanf(line,"led=%d",&ival)==1)        { g_settings.led_enabled=ival;       continue; }
         for (int i = 0; i < 8; i++) {
             char key[8]; snprintf(key, 8, "eq%d=%%f", i);
             if (sscanf(line, key, &fval)==1) { g_settings.eq_gains[i]=fval; break; }
@@ -196,7 +193,6 @@ void settings_save_sync(void)
     fprintf(f, "last_path=%s\n", g_settings.last_path);
     fprintf(f, "last_track=%d\n", g_settings.last_track);
     fprintf(f, "eq_preset=%d\n", g_settings.eq_preset_index);
-    fprintf(f, "led=%d\n", g_settings.led_enabled);
     for (int i = 0; i < 8; i++)
         fprintf(f, "eq%d=%.2f\n", i, g_settings.eq_gains[i]);
     fclose(f);
@@ -206,7 +202,7 @@ void settings_save_sync(void)
 }
 
 /* ── Settings items ───────────────────────────────────────────── */
-#define SITEM_COUNT 12
+#define SITEM_COUNT 11
 static const char *sitem_labels[SITEM_COUNT] = {
     "Volume",
     "Theme",
@@ -216,9 +212,8 @@ static const char *sitem_labels[SITEM_COUNT] = {
     "Repetition",
     "Reprendre au demarrage",
     "Repertoire de depart",
-    "Equalizer audio",
+    "Sauvegarder",
     "Vitesse lecture",
-    "LED notification",
     "Version",
 };
 
@@ -228,7 +223,7 @@ static void sitem_value(int idx, char *buf, int bufsz)
         case 0: snprintf(buf,bufsz,"%.0f%%", g_settings.volume*100); break;
         case 1: snprintf(buf,bufsz,"%s", theme_name(g_settings.theme_index)); break;
         case 2: { const char *v[]={"Barres","Onde","Cercle","Feu","EQ"};
-                  snprintf(buf,bufsz,"%s",v[g_settings.viz_style % 5]); break; }
+                  snprintf(buf,bufsz,"%s",v[g_settings.viz_style % 4]); break; }
         case 3: snprintf(buf,bufsz,"%s", g_settings.show_cover?"ON":"OFF"); break;
         case 4: snprintf(buf,bufsz,"%s", g_settings.shuffle?"ON":"OFF"); break;
         case 5: { const char *r[]={"Non","x1","Tout"};
@@ -253,8 +248,7 @@ static void sitem_value(int idx, char *buf, int bufsz)
             snprintf(buf, bufsz, "%.1fx", sp);
             break;
         }
-        case 10: snprintf(buf,bufsz,"%s", g_settings.led_enabled?"ON":"OFF"); break;
-        case 11: snprintf(buf,bufsz,"V" APP_VERSION); break;
+        case 10: snprintf(buf,bufsz,"V" APP_VERSION); break;
 
         default: buf[0]=0; break;
     }
@@ -295,7 +289,7 @@ void settings_draw_bottom(int *selected_item)
     draw_text(6,5,0.52f,th->text_primary,"Parametres");
 
     /* Defilement : 8 items visibles max */
-    int vis = 10;
+    int vis = 8;
     int scroll = 0;
     if (*selected_item >= vis)
         scroll = *selected_item - vis + 1;
@@ -361,8 +355,6 @@ void settings_handle_input(int *selected_item, u32 keys_down)
                     settings_save();
                     break;
             }
-            case 10: g_settings.led_enabled = !g_settings.led_enabled;
-                     settings_save(); break;
         }
     }
 
@@ -396,8 +388,6 @@ void settings_handle_input(int *selected_item, u32 keys_down)
                       audio_eq_apply_preset(presets[g_settings.eq_preset_index]);
                       for(int i=0;i<8;i++) g_settings.eq_gains[i]=audio_eq_get_gain(i); }
                     break;
-            case 10: g_settings.led_enabled = !g_settings.led_enabled;
-                     settings_save(); break;
         }
     }
 

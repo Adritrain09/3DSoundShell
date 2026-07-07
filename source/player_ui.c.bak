@@ -1,4 +1,35 @@
+// player_ui.c
+// Interface graphique du lecteur audio (écran du haut + bas)
+// ============================================================
+// GUIDE RAPIDE POUR MODIFIER L'EFFET 3D :
+//
+//  d3(X) = décalage 3D, où X est la "profondeur" :
+//
+//   X positif (+) = l'élément SORT de l'écran (avant-plan)
+//   X négatif (-) = l'élément RENTRE dans l'écran (fond)
+//   X = 0         = pas d'effet 3D (plan neutre)
+//
+//  Exemples :
+//   d3(0.5f)  = légèrement en avant
+//   d3(1.0f)  = bien en avant
+//   d3(2.0f)  = très en avant (peut fatiguer les yeux !)
+//   d3(-1.0f) = légèrement en fond
+//
+//  Si l'effet 3D fatigue les yeux → réduire les valeurs
+//  Si l'effet 3D est trop discret  → augmenter les valeurs
+//
+// PROFONDEURS ACTUELLES :
+//   Header (barre du haut) ............. d3(0.8f)
+//   Pochette album ...................... d3(1.2f)
+//   Titre / Artiste / Album ............. d3(0.8f)
+//   Barre de progression ................ d3(1.0f)
+//   Curseur de progression .............. d3(1.5f)
+//   Volume .............................. d3(0.0f)
+//   Visualiseur EQ ...................... d3(0.6f)
+// ============================================================
+
 #include "player_ui.h"
+#include "main.h"
 #include "settings.h"
 #include "theme.h"
 #include "audio.h"
@@ -8,8 +39,12 @@
 #include <stdlib.h>
 #include <citro2d.h>
 #include <citro3d.h>
+#include <time.h>
 
-/* ── Morton / texture upload ───────────────────────────────── */
+// ============================================================
+// TEXTURE POCHETTE — fonctions internes
+// ============================================================
+
 static u32 npow2(u32 v)
 {
     v--; v|=v>>1; v|=v>>2; v|=v>>4; v|=v>>8; v|=v>>16;
@@ -26,235 +61,542 @@ static u32 morton(u32 x, u32 y)
 
 static void upload_cover_tex(PlayerUI *ui, const u8 *rgba, int w, int h)
 {
-    /* Supprimer ancienne texture si existe */
     if (ui->cover_tex_init) {
         C3D_TexDelete(&ui->cover_tex);
         ui->cover_tex_init = false;
     }
-
     u32 tw = npow2((u32)w);
     u32 th = npow2((u32)h);
-
     if (!C3D_TexInit(&ui->cover_tex, (u16)tw, (u16)th, GPU_RGBA8))
         return;
-
-    /* Remplir de noir transparent */
     u8 *dst = (u8*)ui->cover_tex.data;
     memset(dst, 0, tw * th * 4);
-
-    /* Convertir en format Morton (tiled) attendu par GPU 3DS */
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             u32 tile = ((u32)y/8)*(tw/8) + ((u32)x/8);
             u32 mi   = morton((u32)x&7, (u32)y&7);
             u32 di   = (tile*64 + mi) * 4;
             const u8 *s = rgba + (y*w + x) * 4;
-            /* GPU 3DS attend RGBA en ordre inverse = ABGR */
-            dst[di+0] = s[3]; /* A */
-            dst[di+1] = s[2]; /* B */
-            dst[di+2] = s[1]; /* G */
-            dst[di+3] = s[0]; /* R */
+            dst[di+0] = s[3];
+            dst[di+1] = s[2];
+            dst[di+2] = s[1];
+            dst[di+3] = s[0];
         }
     }
-
     C3D_TexSetFilter(&ui->cover_tex, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&ui->cover_tex, GPU_CLAMP_TO_BORDER, GPU_CLAMP_TO_BORDER);
-
-    /* Configurer le sous-rectangle */
     ui->cover_subtex.width  = (u16)w;
     ui->cover_subtex.height = (u16)h;
     ui->cover_subtex.left   = 0.f;
     ui->cover_subtex.top    = 1.f;
     ui->cover_subtex.right  = (float)w / (float)tw;
     ui->cover_subtex.bottom = 1.f - (float)h / (float)th;
-
     ui->cover_tex_init = true;
     ui->cover_w = w;
     ui->cover_h = h;
 }
 
-/* ── Draw helpers ───────────────────────────────────────────── */
-
-/* TextBuf statique: alloue une seule fois, reutilise chaque frame */
+// ============================================================
+// BUFFER TEXTE OPTIMISÉ
+// ─────────────────────────────────────────────────────────────
+// PROBLÈME PRÉCÉDENT :
+//   Chaque draw_text() faisait C2D_TextBufClear() → des centaines
+//   d'appels par seconde → fragmentation mémoire → micro-freezes
+//
+// SOLUTION :
+//   1. TextBuf assez grand pour TOUS les textes d'une frame (8192)
+//   2. Clear UNE SEULE FOIS par frame (player_ui_frame_begin)
+//   3. Tous les draw_text() de la frame partagent le même buffer
+// ============================================================
 static C2D_TextBuf s_textbuf = NULL;
 
-static void ensure_textbuf(void)
+// ← Appelé UNE FOIS au début de chaque frame (dans draw_top ET draw_bottom)
+static void frame_begin(void)
 {
     if (!s_textbuf)
-        s_textbuf = C2D_TextBufNew(4096);
+        s_textbuf = C2D_TextBufNew(8192); // ← assez grand pour tous les textes
+    C2D_TextBufClear(s_textbuf);          // ← UN SEUL clear par frame
 }
 
-static void draw_rect(float x, float y, float w, float h, u32 c)
-{
-    C2D_DrawRectSolid(x, y, 0, w, h, c);
-}
-
+// Affiche du texte SANS clear (le clear est fait par frame_begin)
+// x, y = position   sz = taille (0.4=petit, 0.5=moyen, 0.6=grand)
+// c = couleur   t = texte à afficher
 static void draw_text(float x, float y, float sz, u32 c, const char *t)
 {
-    ensure_textbuf();
-    C2D_TextBufClear(s_textbuf);
+    if (!s_textbuf || !t || !t[0]) return;
     C2D_Text tx;
     C2D_TextParse(&tx, s_textbuf, t);
     C2D_TextOptimize(&tx);
     C2D_DrawText(&tx, C2D_AlignLeft|C2D_WithColor, x, y, 0, sz, sz, c);
 }
 
-static void draw_text_centered(float cx, float y, float sz, u32 c, const char *t)
+// ============================================================
+// HORLOGE MISE EN CACHE
+// ─────────────────────────────────────────────────────────────
+// PROBLÈME PRÉCÉDENT :
+//   localtime() appelé 60 fois/sec → inutile (secondes changent 1x/sec)
+//
+// SOLUTION :
+//   On ne recalcule l'heure qu'une fois par seconde
+// ============================================================
+static char  s_clock_str[12]  = "00:00:00";
+static u64   s_clock_last_sec = 0;
+
+// ← Appelé une fois par frame, met à jour s_clock_str si nécessaire
+static void clock_update(void)
 {
-    ensure_textbuf();
-    C2D_TextBufClear(s_textbuf);
-    C2D_Text tx;
-    C2D_TextParse(&tx, s_textbuf, t);
-    C2D_TextOptimize(&tx);
-    float tw = 0, th = 0;
-    C2D_TextGetDimensions(&tx, sz, sz, &tw, &th);
-    C2D_DrawText(&tx, C2D_WithColor, cx - tw/2.f, y, 0, sz, sz, c);
-    (void)th;
+    // osGetTime() retourne les millisecondes
+    u64 now_sec = osGetTime() / 1000ULL;
+    if (now_sec == s_clock_last_sec) return; // pas de changement cette frame
+    s_clock_last_sec = now_sec;
+
+    time_t t = (time_t)now_sec;
+    struct tm *tm_info = localtime(&t);
+    if (tm_info)
+        snprintf(s_clock_str, 12, "%02d:%02d:%02d",
+                 tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
 }
 
+// ============================================================
+// FONCTION D3() — calcul du décalage 3D stéréoscopique
+//
+//   g_3d_iod = intensité du slider 3D (0.0 à 6.0)
+//   g_3d_eye = 0 pour oeil gauche, 1 pour oeil droit
+//   depth    = profondeur voulue (voir guide en haut)
+//
+//   * 0.5f = facteur d'échelle global
+//            → augmenter pour plus d'effet (ex: 0.7f)
+//            → diminuer pour moins d'effet (ex: 0.3f)
+// ============================================================
+extern float g_3d_iod;
+extern int   g_3d_eye;
+
+static float d3(float depth)
+{
+    if (g_3d_iod <= 0.f) return 0.f;
+    float shift = depth * g_3d_iod * 0.5f;
+    return (g_3d_eye == 0) ? shift : -shift;
+}
+
+// ============================================================
+// HELPERS DESSIN
+// ============================================================
+
+// Dessine un rectangle plein
+static void draw_rect(float x, float y, float w, float h, u32 c)
+{
+    C2D_DrawRectSolid(x, y, 0, w, h, c);
+}
+
+// Formate un temps en secondes → "m:ss"
 static void fmt_time(char *out, int sec)
 {
     if (sec < 0) sec = 0;
-    snprintf(out, 10, "%d:%02d", sec/60, sec%60);
+    snprintf(out, 12, "%d:%02d", sec/60, sec%60);
 }
 
-/* ── Init ───────────────────────────────────────────────────── */
-void player_ui_init(PlayerUI *ui)
+
+// ============================================================
+// VISUALISEUR MODE "FEU" — barres avec effet flamme
+// ============================================================
+#define FIRE_COLS 16
+
+static float s_fire_h[FIRE_COLS]    = {0}; /* hauteur actuelle */
+static float s_fire_peak[FIRE_COLS] = {0}; /* peak */
+
+static void draw_viz_fire(const PlayerUI *ui, float x, float y,
+                          float w, float h)
 {
-    memset(ui, 0, sizeof(PlayerUI));
-    ui->viz_style      = VIZ_BARS;
-    ui->cover_tex_id   = -1;
-    ui->cover_tex_init = false;
-    ui->cover_loaded   = false;
-    ui->scroll_title_x = 100.f;  /* était: 0 */
-    ui->last_tick      = osGetTime();
+    Theme *th = current_theme;
+    float bw = w / FIRE_COLS - 1.f;
+
+    for (int c = 0; c < FIRE_COLS; c++) {
+        /* Energie de la bande */
+        int band = c * EQ_BANDS / FIRE_COLS;
+        float energy = ui->viz_smooth[band];
+
+        /* Lissage : monte vite, descend lentement */
+        float spd = (energy > s_fire_h[c]) ? 0.5f : 0.05f;
+        s_fire_h[c] += (energy - s_fire_h[c]) * spd;
+
+        /* Peak */
+        if (s_fire_h[c] > s_fire_peak[c])
+            s_fire_peak[c] = s_fire_h[c];
+        else
+            s_fire_peak[c] -= 0.003f;
+        if (s_fire_peak[c] < 0.f) s_fire_peak[c] = 0.f;
+
+        float bh  = s_fire_h[c] * h;
+        if (bh < 2.f) bh = 2.f;
+        float bx  = x + c * (bw + 1.f);
+        float by  = y + h - bh;
+        float heat = s_fire_h[c];
+
+        /* Couleur : noir→rouge→orange→jaune selon hauteur */
+        u8 R, G, B;
+        if (heat < 0.33f) {
+            float t = heat / 0.33f;
+            R = (u8)(t * 255); G = 0; B = 0;
+        } else if (heat < 0.66f) {
+            float t = (heat - 0.33f) / 0.33f;
+            R = 255; G = (u8)(t * 160); B = 0;
+        } else {
+            float t = (heat - 0.66f) / 0.34f;
+            R = 255; G = (u8)(160 + t * 95); B = (u8)(t * 150);
+        }
+
+        /* Dégradé : bas chaud, haut froid */
+        draw_rect(bx, by,      bw, bh * 0.5f, RGBA8(R, G,   B,   255));
+        draw_rect(bx, by+bh*0.5f, bw, bh*0.5f, RGBA8(R/2, G/4, 0, 200));
+
+        /* Peak indicator */
+        if (s_fire_peak[c] > 0.05f) {
+            float py = y + h - s_fire_peak[c] * h;
+            draw_rect(bx, py, bw, 2.f, RGBA8(255, 255, 200, 200));
+        }
+
+        /* Reflet sol */
+        draw_rect(bx, y+h, bw, bh*0.1f, RGBA8(R, G/2, 0, 80));
+    }
+    (void)th;
+
+    /* Dessin */
+    for (int r = 0; r < FIRE_ROWS; r++) {
+        for (int c = 0; c < FIRE_COLS; c++) {
+            float heat = s_fire[r][c];
+            if (heat < 0.02f) continue;
+
+            /* Couleur : noir → rouge → orange → jaune → blanc */
+            u8 R, G, B;
+            if (heat < 0.33f) {
+                /* noir → rouge */
+                float t = heat / 0.33f;
+                R = (u8)(t * 255); G = 0; B = 0;
+            } else if (heat < 0.66f) {
+                /* rouge → orange/jaune */
+                float t = (heat - 0.33f) / 0.33f;
+                R = 255; G = (u8)(t * 180); B = 0;
+            } else {
+                /* jaune → blanc */
+                float t = (heat - 0.66f) / 0.34f;
+                R = 255; G = (u8)(180 + t * 75); B = (u8)(t * 200);
+            }
+
+            float px = x + c * cw;
+            float py = y + (FIRE_ROWS - 1 - r) * (h / FIRE_ROWS);
+            float ph = h / FIRE_ROWS + 1.f;
+            draw_rect(px, py, cw, ph, RGBA8(R, G, B, 220));
+        }
+    }
+    (void)th;
 }
 
-/* ── Load cover ─────────────────────────────────────────────── */
-void player_ui_load_cover(PlayerUI *ui, const AudioMetadata *meta)
+// ============================================================
+// VISUALISEUR MODE "PLUIE" — gouttes synchronisées au rythme
+// ============================================================
+#define RAIN_DROPS 24
+#define RAIN_COLS  16  /* colonnes de pluie */
+
+typedef struct {
+    float y;        /* position Y actuelle */
+    float speed;    /* vitesse de base */
+    float len;      /* longueur goutte */
+    u8    col;      /* colonne */
+    bool  active;
+} RainDrop;
+
+static RainDrop s_rain[RAIN_DROPS] = {{0}};
+static bool     s_rain_init = false;
+
+static void draw_viz_rain(const PlayerUI *ui, float x, float y,
+                          float w, float h)
 {
-    /* Reset */
-    ui->cover_loaded = false;
-    if (ui->cover_tex_init) {
-        C3D_TexDelete(&ui->cover_tex);
-        ui->cover_tex_init = false;
+    Theme *th = current_theme;
+    float col_w = w / RAIN_COLS;
+
+    /* Init */
+    if (!s_rain_init) {
+        for (int i = 0; i < RAIN_DROPS; i++) {
+            s_rain[i].col    = (u8)(rand() % RAIN_COLS);
+            s_rain[i].y      = y - (float)(rand() % (int)h);
+            s_rain[i].speed  = 2.f + (float)(rand() % 40) / 10.f;
+            s_rain[i].len    = 6.f + (float)(rand() % 10);
+            s_rain[i].active = true;
+        }
+        s_rain_init = true;
     }
 
-    if (!meta || !meta->has_cover ||
-        !meta->cover_data || meta->cover_size == 0) {
-        return;
+    /* Energie par colonne depuis viz */
+    float col_energy[RAIN_COLS];
+    for (int c = 0; c < RAIN_COLS; c++) {
+        int band = c * EQ_BANDS / RAIN_COLS;
+        col_energy[c] = ui->viz_smooth[band];
     }
 
-    /* Decoder JPEG/PNG avec stb_image */
-    int w, h, ch;
-    u8 *px = stbi_load_from_memory(
-        (const stbi_uc*)meta->cover_data,
-        (int)meta->cover_size,
-        &w, &h, &ch, 4  /* forcer RGBA */
-    );
+    /* Fond noir semi-transparent pour effet tunnel */
+    draw_rect(x, y, w, h, RGBA8(0, 0, 5, 40));
 
-    if (!px) {
-        /* Log erreur */
-        FILE *f = fopen("sdmc:/3DSoundShell/debug.log", "a");
-        if (f) { fprintf(f, "stbi_load failed: %s\n", stbi_failure_reason()); fclose(f); }
-        return;
+    /* Barres de niveau en fond (subtiles) */
+    for (int c = 0; c < RAIN_COLS; c++) {
+        float bh = col_energy[c] * h * 0.3f;
+        float bx = x + c * col_w;
+        draw_rect(bx, y+h-bh, col_w-1.f, bh,
+                  RGBA8(0, 60, 80, 60));
     }
 
-    /* Redimensionner a 128x128 si trop grand */
-    int tw = w, th = h;
-    u8 *scaled = NULL;
+    /* Mise à jour et dessin des gouttes */
+    for (int i = 0; i < RAIN_DROPS; i++) {
+        RainDrop *d = &s_rain[i];
+        if (!d->active) continue;
 
-    if (w > 128 || h > 128) {
-        tw = 128; th = 128;
-        scaled = (u8*)malloc(128 * 128 * 4);
-        if (!scaled) { stbi_image_free(px); return; }
+        /* Vitesse modulée par l énergie de la colonne */
+        float energy = col_energy[d->col % RAIN_COLS];
+        float spd = d->speed * (1.f + energy * 4.f);
+        d->y += spd;
 
-        for (int dy = 0; dy < 128; dy++) {
-            for (int dx = 0; dx < 128; dx++) {
-                int sx = dx * w / 128;
-                int sy = dy * h / 128;
-                if (sx >= w) sx = w-1;
-                if (sy >= h) sy = h-1;
-                memcpy(scaled + (dy*128+dx)*4,
-                       px    + (sy*w  +sx)*4, 4);
+        /* Reset quand sort en bas */
+        if (d->y > y + h + d->len) {
+            d->col   = (u8)(rand() % RAIN_COLS);
+            d->y     = y - d->len;
+            d->speed = 2.f + (float)(rand() % 40) / 10.f;
+            d->len   = 6.f + (float)(rand() % 10);
+        }
+
+        /* Ne dessiner que si dans la zone */
+        if (d->y + d->len < y || d->y > y + h) continue;
+
+        float gx = x + d->col * col_w + col_w * 0.25f;
+
+        /* Couleur basée sur vitesse */
+        u8 r = (u8)((th->accent >> 0) & 0xff);
+        u8 g2= (u8)((th->accent >> 8) & 0xff);
+        u8 b = (u8)((th->accent >>16) & 0xff);
+
+        /* Tête brillante */
+        draw_rect(gx, d->y, 2.f, 3.f,
+                  RGBA8(255, 255, 255, 240));
+        /* Corps */
+        draw_rect(gx, d->y + 3.f, 2.f, d->len - 3.f,
+                  RGBA8(r, g2, b, 180));
+        /* Traîne transparente */
+        draw_rect(gx, d->y + d->len, 2.f, d->len * 0.4f,
+                  RGBA8(r/2, g2/2, b/2, 80));
+    }
+    (void)th;
+}
+ RainDrop;
+
+static RainDrop s_rain[RAIN_DROPS] = {{0}};
+static bool     s_rain_init = false;
+static int      s_rain_frame = 0;
+
+static void draw_viz_rain(const PlayerUI *ui, float x, float y,
+                          float w, float h)
+{
+    Theme *th = current_theme;
+
+    /* Init des gouttes */
+    if (!s_rain_init) {
+        for (int i = 0; i < RAIN_DROPS; i++) {
+            s_rain[i].x      = x + (float)(rand() % (int)w);
+            s_rain[i].y      = y + (float)(rand() % (int)h);
+            s_rain[i].speed  = 1.5f + (float)(rand() % 30) / 10.f;
+            s_rain[i].len    = 4.f  + (float)(rand() % 12);
+            s_rain[i].bright = 0.5f + (float)(rand() % 5) / 10.f;
+            s_rain[i].active = true;
+        }
+        s_rain_init = true;
+    }
+
+    /* Energie audio globale */
+    float energy = 0.f;
+    for (int i = 0; i < EQ_BANDS; i++)
+        energy += ui->viz_smooth[i];
+    energy /= EQ_BANDS;
+
+    /* Update 30fps max */
+    s_rain_frame++;
+    bool rain_update = (s_rain_frame >= 2);
+    if (rain_update) s_rain_frame = 0;
+
+    /* Mise à jour et dessin */
+    for (int i = 0; i < RAIN_DROPS; i++) {
+        RainDrop *d = &s_rain[i];
+        if (!d->active) continue;
+
+        if (rain_update) {
+        /* Vitesse modulée par l énergie audio */
+        float spd = d->speed * (1.f + energy * 3.f);
+        d->y += spd;
+
+        /* Reset quand sort de l écran */
+        if (d->y > y + h + d->len) {
+            d->x      = x + (float)(rand() % (int)w);
+            d->y      = y - d->len;
+            d->speed  = 1.5f + (float)(rand() % 30) / 10.f;
+            d->len    = 4.f  + (float)(rand() % 12);
+            d->bright = 0.5f + (float)(rand() % 5) / 10.f;
+        }
+        } /* fin rain_update */
+
+        /* Couleur basée sur le thème + luminosité */
+        u32 ac = th->accent;
+        u8 r = (u8)(((ac>>0)&0xff) * d->bright);
+        u8 g = (u8)(((ac>>8)&0xff) * d->bright);
+        u8 b = (u8)(((ac>>16)&0xff) * d->bright);
+
+        /* Tête de la goutte plus brillante */
+        draw_rect(d->x, d->y, 2.f, d->len * 0.3f,
+                  RGBA8(255, 255, 255, 200));
+        /* Corps de la goutte */
+        draw_rect(d->x, d->y + d->len * 0.3f, 2.f, d->len * 0.7f,
+                  RGBA8(r, g, b, 180));
+
+        /* Éclaboussure au sol */
+        if (d->y + d->len > y + h - 4.f) {
+            float splash = (d->y + d->len - (y + h - 4.f)) / 4.f;
+            if (splash > 0.f && splash < 1.f) {
+                draw_rect(d->x - splash*4.f, y+h-2.f,
+                          splash*8.f, 2.f,
+                          RGBA8(r, g, b, (u8)(180*(1.f-splash))));
             }
         }
     }
-
-    /* Upload vers GPU */
-    upload_cover_tex(ui, scaled ? scaled : px, tw, th);
-
-    stbi_image_free(px);
-    if (scaled) free(scaled);
-
-    ui->cover_loaded = ui->cover_tex_init;
-
-    /* Log succes */
-    FILE *f = fopen("sdmc:/3DSoundShell/debug.log", "a");
-    if (f) {
-        fprintf(f, "cover loaded: %dx%d -> %dx%d tex_init=%d\n",
-                w, h, tw, th, ui->cover_tex_init);
-        fclose(f);
-    }
 }
 
-/* ── Update ─────────────────────────────────────────────────── */
-void player_ui_update(PlayerUI *ui, const AudioMetadata *meta, float dt)
+// ============================================================
+// VISUALISEUR MODE "EQ" — 16 barres avec peak indicator
+//
+// Pour modifier :
+//   VIZ_EQ_BARS         = nombre de barres
+//   s_viz_eq_peak_vel  += X → vitesse chute peak (augmenter = tombe vite)
+//   0.4f / 0.08f        = vitesse montée / descente barres
+// ============================================================
+#define VIZ_EQ_BARS 16
+
+static float s_viz_eq_peak[VIZ_EQ_BARS]     = {0};
+static float s_viz_eq_peak_vel[VIZ_EQ_BARS] = {0};
+static float s_viz_eq_smooth[VIZ_EQ_BARS]   = {0};
+
+static const char *s_viz_eq_labels[VIZ_EQ_BARS] = {
+    "20","32","50","80","125","200","315","500",
+    "800","1k","2k","3k","5k","8k","13k","20k"
+};
+
+static void draw_viz_eq(const PlayerUI *ui, float x, float y,
+                        float w, float h)
 {
-    audio_get_visualizer(ui->viz_data);
-    for (int i = 0; i < EQ_BANDS; i++) {
-        float spd = (ui->viz_data[i] > ui->viz_smooth[i]) ? 0.3f : 0.08f;
-        ui->viz_smooth[i] += (ui->viz_data[i] - ui->viz_smooth[i]) * spd;
+    Theme *th = current_theme;
+
+    // Interpolation 8 bandes → 16 barres
+    for (int i = 0; i < VIZ_EQ_BARS; i++) {
+        float fi   = (float)i / (VIZ_EQ_BARS - 1) * (EQ_BANDS - 1);
+        int   lo   = (int)fi;
+        float frac = fi - lo;
+        if (lo >= EQ_BANDS - 1) lo = EQ_BANDS - 2;
+        float val  = ui->viz_smooth[lo] * (1.f - frac)
+                   + ui->viz_smooth[lo+1] * frac;
+
+        // Lissage : 0.4f = montée rapide, 0.08f = descente lente
+        float spd = (val > s_viz_eq_smooth[i]) ? 0.4f : 0.08f;
+        s_viz_eq_smooth[i] += (val - s_viz_eq_smooth[i]) * spd;
+
+        // Peak indicator
+        if (s_viz_eq_smooth[i] >= s_viz_eq_peak[i]) {
+            s_viz_eq_peak[i]     = s_viz_eq_smooth[i];
+            s_viz_eq_peak_vel[i] = 0.f;
+        } else {
+            s_viz_eq_peak_vel[i] += 0.002f; // ← vitesse de chute
+            s_viz_eq_peak[i]     -= s_viz_eq_peak_vel[i];
+            if (s_viz_eq_peak[i] < 0.f) s_viz_eq_peak[i] = 0.f;
+        }
     }
 
-    /* Scroll titre long */
-    if (meta && strlen(meta->title) > 30) {
-        ui->scroll_title_x -= 0.8f;
-        float title_w = strlen(meta->title) * 8.0f * 0.52f;
-        if (ui->scroll_title_x < -(title_w))
-            ui->scroll_title_x = 100.f;
-    } else {
-        ui->scroll_title_x = 100.f;
-    }
+    float label_h = 10.f;
+    float draw_h  = h - label_h;
+    float bw      = w / VIZ_EQ_BARS - 1.f;
 
-    (void)dt;
+    for (int i = 0; i < VIZ_EQ_BARS; i++) {
+        float bx = x + i * (bw + 1.f);
+
+        // Couleur interpolée depuis le thème
+        float ci    = (float)i / (VIZ_EQ_BARS - 1) * (EQ_BANDS - 1);
+        int   clo   = (int)ci;
+        float cfrac = ci - clo;
+        if (clo >= EQ_BANDS - 1) clo = EQ_BANDS - 2;
+
+        u32 c0 = th->visualizer_bars[clo];
+        u32 c1 = th->visualizer_bars[clo + 1];
+        u8 r = (u8)(((c0>>0)&0xff)*(1.f-cfrac) + ((c1>>0)&0xff)*cfrac);
+        u8 g = (u8)(((c0>>8)&0xff)*(1.f-cfrac) + ((c1>>8)&0xff)*cfrac);
+        u8 b = (u8)(((c0>>16)&0xff)*(1.f-cfrac) + ((c1>>16)&0xff)*cfrac);
+        u32 vcol = RGBA8(r, g, b, 220);
+
+        // Ligne de base
+        draw_rect(bx, y + draw_h, bw + 1.f, 1.f, RGBA8(255,255,255,60));
+
+        // Barre principale
+        float vh = s_viz_eq_smooth[i] * draw_h;
+        if (vh < 2.f) vh = 2.f;
+        float vy = y + draw_h - vh;
+        draw_rect(bx, vy, bw, vh, vcol);
+
+        // Reflet sol (12% hauteur, très transparent)
+        draw_rect(bx, y + draw_h, bw, vh * 0.12f, RGBA8(r, g, b, 50));
+
+        // Peak indicator
+        float pk_y = y + draw_h - s_viz_eq_peak[i] * draw_h;
+        if (pk_y < y) pk_y = y;
+        if (s_viz_eq_peak[i] > 0.05f && pk_y < vy - 2.f)
+            draw_rect(bx, pk_y, bw, 2.f, RGBA8(255,255,255,140));
+
+        // Label fréquence (1 sur 2)
+        if (i % 2 == 0)
+            draw_text(bx, y + draw_h + 1.f, 0.30f,
+                      th->text_disabled, s_viz_eq_labels[i]);
+    }
 }
 
-/* ── Visualizer: Bars ───────────────────────────────────────── */
-static void draw_viz_bars(const PlayerUI *ui, float x, float y, float w, float h)
-
-/* ── Visualizer: Bars ───────────────────────────────────────── */
-static void draw_viz_bars(const PlayerUI *ui, float x, float y, float w, float h)
+// ============================================================
+// VISUALISEUR MODE "BARRES" — 8 barres simples
+// ============================================================
+static void draw_viz_bars(const PlayerUI *ui, float x, float y,
+                          float w, float h)
 {
     Theme *th = current_theme;
     float bw  = w / EQ_BANDS - 2;
+
     for (int i = 0; i < EQ_BANDS; i++) {
         float bh = ui->viz_smooth[i] * h;
         if (bh < 2) bh = 2;
         float bx = x + i * (bw + 2);
         float by = y + h - bh;
         draw_rect(bx, by, bw, bh, th->visualizer_bars[i]);
-        /* Reflet */
-        draw_rect(bx, y+h, bw, bh*0.2f,
+        // Reflet sol (30% hauteur, transparent)
+        draw_rect(bx, y+h, bw, bh*0.3f,
             RGBA8((th->visualizer_bars[i]>>0)&0xff,
                   (th->visualizer_bars[i]>>8)&0xff,
                   (th->visualizer_bars[i]>>16)&0xff, 40));
     }
 }
 
-/* ── Visualizer: Wave ───────────────────────────────────────── */
-static void draw_viz_wave(const PlayerUI *ui, float x, float y, float w, float h)
+// ============================================================
+// VISUALISEUR MODE "ONDE"
+// ============================================================
+static void draw_viz_wave(const PlayerUI *ui, float x, float y,
+                          float w, float h)
 {
     Theme *th = current_theme;
     float cy = y + h/2.f;
+
     for (int i = 0; i < EQ_BANDS-1; i++) {
-        float ax = x + i     * (w/(EQ_BANDS-1));
-        float ay = cy - ui->viz_smooth[i]   * (h/2.f);
-        float bx = x + (i+1) * (w/(EQ_BANDS-1));
-        float by2= cy - ui->viz_smooth[i+1] * (h/2.f);
-        float dx = bx-ax, dy2 = by2-ay;
+        float ax  = x + i     * (w/(EQ_BANDS-1));
+        float ay  = cy - ui->viz_smooth[i]   * (h/2.f);
+        float bx  = x + (i+1) * (w/(EQ_BANDS-1));
+        float by2 = cy - ui->viz_smooth[i+1] * (h/2.f);
+        float dx  = bx-ax, dy2 = by2-ay;
         float len = sqrtf(dx*dx + dy2*dy2);
-        int segs = (int)(len/2)+1;
+        int segs  = (int)(len/2)+1;
         for (int s = 0; s < segs; s++) {
             float t  = (float)s/segs;
             float px = ax + dx*t;
@@ -264,15 +606,19 @@ static void draw_viz_wave(const PlayerUI *ui, float x, float y, float w, float h
     }
 }
 
-/* ── Visualizer: Circle ─────────────────────────────────────── */
+// ============================================================
+// VISUALISEUR MODE "CERCLE"
+// ============================================================
 static void draw_viz_circle(const PlayerUI *ui, float cx, float cy, float r)
 {
     Theme *th = current_theme;
     int segs  = EQ_BANDS * 4;
+
     for (int i = 0; i < segs; i++) {
         float angle = (float)i / segs * 2.f * M_PI;
         int   band  = i * EQ_BANDS / segs;
-        float len   = r*0.3f + ui->viz_smooth[band] * r*0.7f;
+        // 0.5f = rayon minimum, 0.8f = amplitude max
+        float len = r*0.5f + ui->viz_smooth[band] * r*0.8f;
         float x1 = cx + cosf(angle)*r*0.3f;
         float y1 = cy + sinf(angle)*r*0.3f;
         float x2 = cx + cosf(angle)*len;
@@ -289,7 +635,9 @@ static void draw_viz_circle(const PlayerUI *ui, float cx, float cy, float r)
     draw_rect(cx-3, cy-3, 6, 6, th->accent);
 }
 
-/* ── Cover placeholder ──────────────────────────────────────── */
+// ============================================================
+// POCHETTE PLACEHOLDER
+// ============================================================
 static void draw_cover_placeholder(float x, float y, float sz)
 {
     Theme *th = current_theme;
@@ -298,7 +646,6 @@ static void draw_cover_placeholder(float x, float y, float sz)
     draw_rect(x,      y+sz-2, sz, 2,  th->border);
     draw_rect(x,      y,      2,  sz, th->border);
     draw_rect(x+sz-2, y,      2,  sz, th->border);
-    /* Note de musique */
     float cx = x+sz/2.f, cy = y+sz/2.f;
     draw_rect(cx-2, cy-12, 4,  16, th->text_disabled);
     draw_rect(cx-2, cy-12, 10, 4,  th->text_disabled);
@@ -307,43 +654,173 @@ static void draw_cover_placeholder(float x, float y, float sz)
     draw_rect(cx+2, cy+4,  8,  6,  th->text_disabled);
 }
 
-/* ── Top screen ─────────────────────────────────────────────── */
+// ============================================================
+// INIT / LOAD / UPDATE / EXIT
+// ============================================================
+
+void player_ui_init(PlayerUI *ui)
+{
+    memset(ui, 0, sizeof(PlayerUI));
+    ui->viz_style      = VIZ_BARS;
+    ui->cover_tex_id   = -1;
+    ui->cover_tex_init = false;
+    ui->cover_loaded   = false;
+    ui->scroll_title_x = (float)TOP_WIDTH;
+    ui->last_tick      = osGetTime();
+}
+
+void player_ui_load_cover(PlayerUI *ui, const AudioMetadata *meta)
+{
+    ui->cover_loaded = false;
+    if (ui->cover_tex_init) {
+        C3D_TexDelete(&ui->cover_tex);
+        ui->cover_tex_init = false;
+    }
+    if (!meta || !meta->has_cover ||
+        !meta->cover_data || meta->cover_size == 0)
+        return;
+    int w, h, ch;
+    u8 *px = stbi_load_from_memory(
+        (const stbi_uc*)meta->cover_data,
+        (int)meta->cover_size,
+        &w, &h, &ch, 4);
+    if (!px) return;
+    int tw = w, th_i = h;
+    u8 *scaled = NULL;
+    if (w > 128 || h > 128) {
+        tw = 128; th_i = 128;
+        scaled = (u8*)malloc(128 * 128 * 4);
+        if (!scaled) { stbi_image_free(px); return; }
+        for (int dy = 0; dy < 128; dy++) {
+            for (int dx = 0; dx < 128; dx++) {
+                int sx = dx * w / 128;
+                int sy = dy * h / 128;
+                if (sx >= w) sx = w-1;
+                if (sy >= h) sy = h-1;
+                memcpy(scaled + (dy*128+dx)*4,
+                       px    + (sy*w+sx)*4, 4);
+            }
+        }
+    }
+    upload_cover_tex(ui, scaled ? scaled : px, tw, th_i);
+    stbi_image_free(px);
+    if (scaled) free(scaled);
+    ui->cover_loaded = ui->cover_tex_init;
+}
+
+void player_ui_update(PlayerUI *ui, const AudioMetadata *meta, float dt)
+{
+    // Mise à jour horloge (1x/sec seulement, pas 60x/sec !)
+    clock_update();
+
+    // Données visualiseur
+    if (ui->viz_style == VIZ_EQ)
+        audio_get_visualizer_fft(ui->viz_data);
+    else
+        audio_get_visualizer(ui->viz_data);
+
+    // Lissage : 0.3f montée, 0.08f descente
+    for (int i = 0; i < EQ_BANDS; i++) {
+        float spd = (ui->viz_data[i] > ui->viz_smooth[i]) ? 0.3f : 0.08f;
+        ui->viz_smooth[i] += (ui->viz_data[i] - ui->viz_smooth[i]) * spd;
+    }
+
+    // Scroll titre
+    // title_zone_w = largeur disponible pour le titre en pixels
+    float title_zone_w = 200.f;
+    float title_px_w   = meta ? (strlen(meta->title) * 8.0f * 0.52f) : 0.f;
+
+    if (meta && title_px_w > title_zone_w) {
+        if (ui->scroll_pause_timer > 0) {
+            ui->scroll_pause_timer--;
+        } else {
+        ui->scroll_title_x -= 1.2f;
+            if (ui->scroll_title_x < -(title_px_w + 160.f)) {
+                ui->scroll_title_x    = 100.f;
+                ui->scroll_pause_timer = 120; // ← 2sec pause à 60fps
+            }
+        }
+    } else {
+        ui->scroll_title_x    = 100.f;
+        ui->scroll_pause_timer = 0;
+    }
+    (void)dt;
+}
+
+// ============================================================
+// DRAW TOP — écran du haut avec effet 3D
+//
+// STRUCTURE :
+//  Y=0   Header (barre titre)          d3(0.8f)
+//  Y=24  Pochette 84x84                d3(1.2f)
+//        Titre/Artiste/Album            d3(0.8f)
+//  Y=128 Barre progression             d3(1.0f)
+//        Curseur                        d3(1.5f)
+//        Volume                         d3(0.0f)
+//  Y=163 Visualiseur                   d3(0.6f)
+//  Y=223 Fin écran
+// ============================================================
 void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
                         const Playlist *pl)
 {
     Theme *th = current_theme;
 
+    // ── UN SEUL clear du TextBuf pour toute la frame ──────────
+    // C'est ici que le clear est fait, PAS dans chaque draw_text()
+    frame_begin();
+
+    // ── FOND ─────────────────────────────────────────────────
     draw_rect(0, 0,            TOP_WIDTH, TOP_HEIGHT/2, th->bg_primary);
     draw_rect(0, TOP_HEIGHT/2, TOP_WIDTH, TOP_HEIGHT/2, th->bg_secondary);
 
-    /* Header */
-    draw_rect(0, 0, TOP_WIDTH, 24, th->bg_header);
-    draw_text(8, 4, 0.52f, th->text_accent, "3DSoundShell");
+    // ════════════════════════════════════════════════════════
+    // HEADER  d3(0.8f) ← changer pour plus/moins d'effet
+    // ════════════════════════════════════════════════════════
+    float hd = d3(0.8f);
+    draw_rect(hd, 0, TOP_WIDTH, 24, th->bg_header);
+    draw_text(8 + hd, 4, 0.52f, th->text_accent, "3DSoundShell V" APP_VERSION);
 
-    /* Badge etat */
+    /* Notif MAJ bas gauche - visible 5sec au demarrage */
+    if (g_update_notif_timer > 0) {
+        if (g_update_available) {
+            char maj_notif[48];
+            snprintf(maj_notif, 48, "Mise a jour V%s disponible", g_latest_version);
+            draw_text(8, 225, 0.50f, th->accent2, maj_notif);
+        } else {
+            draw_text(8, 225, 0.50f, th->text_disabled, "Version a jour.");
+        }
+    }
+
+    // Horloge (depuis le cache, pas de localtime() chaque frame)
+    draw_text(TOP_WIDTH/2 - 28 + hd, 5, 0.48f, th->text_accent, s_clock_str);
+
+    // Badge PLAY/PAUSE/STOP
     AudioState st = audio_get_state();
-    const char *badge = (st==AUDIO_PLAYING) ? "PLAY" :
-                        (st==AUDIO_PAUSED)  ? "PAUSE": "STOP";
-    draw_text(TOP_WIDTH-70, 5, 0.48f,
+    const char *badge = (st==AUDIO_PLAYING) ? "PLAY >" :
+                        (st==AUDIO_PAUSED)  ? "PAUSE ||" : "STOP !";
+    draw_text(TOP_WIDTH - 65 + hd, 5, 0.48f,
         st==AUDIO_PLAYING ? th->accent : th->text_disabled, badge);
 
-    /* Shuffle / repeat */
     if (pl->shuffle)
-        draw_text(TOP_WIDTH-120, 5, 0.45f, th->accent2, "[?]");
+        draw_text(TOP_WIDTH - 130 + hd, 5, 0.45f, th->accent2, "[?]");
     if (pl->repeat == REPEAT_ONE)
-        draw_text(TOP_WIDTH-100, 5, 0.45f, th->accent, "REP 1");
+        draw_text(TOP_WIDTH - 100 + hd, 5, 0.45f, th->accent, "rep.1");
     else if (pl->repeat == REPEAT_ALL)
-        draw_text(TOP_WIDTH-100, 5, 0.45f, th->accent, "REP A");
+        draw_text(TOP_WIDTH - 100 + hd, 5, 0.45f, th->accent, "rep.A");
 
-    /* ── Album art ─────────────────────────────────────────── */
-    float art_x=10, art_y=32, art_sz=80;
+    // ════════════════════════════════════════════════════════
+    // POCHETTE  d3(1.2f) ← changer pour plus/moins d'effet
+    //   art_x  = position X (+ décalage 3D)
+    //   art_y  = position Y
+    //   art_sz = taille en pixels
+    // ════════════════════════════════════════════════════════
+    float art_x  = 10 + d3(1.2f);
+    float art_y  = 30;
+    float art_sz = 84;
 
-    if (g_settings.show_cover &&
-        meta->has_cover &&
-        ui->cover_loaded &&
-        ui->cover_tex_init)
+    if (g_settings.show_cover && meta->has_cover &&
+        ui->cover_loaded && ui->cover_tex_init)
     {
-        /* Afficher la vraie texture */
         C2D_Image img = {
             (C3D_Tex*)&ui->cover_tex,
             (Tex3DS_SubTexture*)&ui->cover_subtex
@@ -351,39 +828,59 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
         float sx = art_sz / (float)ui->cover_subtex.width;
         float sy = art_sz / (float)ui->cover_subtex.height;
         C2D_DrawImageAt(img, art_x, art_y, 0, NULL, sx, sy);
+
+        // Bordure (supprimer ces 4 lignes pour enlever la bordure)
+        draw_rect(art_x - 2, art_y - 2,      art_sz + 4, 2, th->accent);
+        draw_rect(art_x - 2, art_y + art_sz, art_sz + 4, 2, th->accent);
+        draw_rect(art_x - 2, art_y - 2,      2, art_sz + 4, th->accent);
+        draw_rect(art_x + art_sz, art_y - 2, 2, art_sz + 4, th->accent);
     } else {
         draw_cover_placeholder(art_x, art_y, art_sz);
     }
 
-      /* ── Infos piste ───────────────────────────────────────── */
-    float info_x = 100;
-    float info_w_draw = TOP_WIDTH - info_x - 4;
+    // ════════════════════════════════════════════════════════
+    // TITRE / ARTISTE / ALBUM  d3(0.8f) ← changer pour ajuster
+    //   info_x  = X de départ (droite de la pochette)
+    //   info_y0 = Y de départ
+    // ════════════════════════════════════════════════════════
+    float info_x  = 104 + d3(0.8f);
+    float info_y0 = 32;
 
-    /* Titre (scroll si long) */
-    float title_len = strlen(meta->title) * 8.f * 0.52f;
-    if (title_len > info_w_draw) {
-        /* Titre long: scroll */
-        draw_text(ui->scroll_title_x,              34, 0.52f, th->text_primary, meta->title);
-        draw_text(ui->scroll_title_x + title_len + 30, 34, 0.52f, th->text_primary, meta->title);
-        /* MASQUE GAUCHE */
-        draw_rect(0,             24, info_x,  22, th->bg_primary);
-        /* MASQUE DROIT */
-        draw_rect(TOP_WIDTH - 4, 24, 4,       22, th->bg_primary);
+    float title_len  = strlen(meta->title) * 8.f * 0.52f;
+    float title_zone = 200.f;
+    if (title_len > title_zone) {
+        // Titre long → scroll
+        draw_text(ui->scroll_title_x + d3(0.8f), info_y0,
+                  0.52f, th->text_primary, meta->title);
+        // Masque pour cacher le débordement
+        draw_rect(0, 24, 102 + d3(0.8f), 90, th->bg_primary);
+        // Redessiner la pochette par-dessus
+        if (g_settings.show_cover && meta->has_cover &&
+            ui->cover_loaded && ui->cover_tex_init) {
+            C2D_Image img2 = {
+                (C3D_Tex*)&ui->cover_tex,
+                (Tex3DS_SubTexture*)&ui->cover_subtex
+            };
+            C2D_DrawImageAt(img2, art_x, art_y, 0, NULL,
+                art_sz/(float)ui->cover_subtex.width,
+                art_sz/(float)ui->cover_subtex.height);
+        } else {
+            draw_cover_placeholder(art_x, art_y, art_sz);
+        }
     } else {
-        draw_text(info_x, 34, 0.52f, th->text_primary, meta->title);
+        draw_text(info_x, info_y0, 0.52f, th->text_primary, meta->title);
     }
 
-    draw_text(info_x, 56, 0.46f, th->text_secondary, meta->artist);
-    draw_text(info_x, 72, 0.44f, th->text_disabled,  meta->album);
+    draw_text(info_x, info_y0 + 22, 0.46f, th->text_secondary, meta->artist);
+    draw_text(info_x, info_y0 + 38, 0.44f, th->text_disabled,  meta->album);
 
     if (meta->year > 0) {
         char yr[16]; snprintf(yr, 16, "(%d)", meta->year);
-        draw_text(info_x+180, 72, 0.44f, th->text_disabled, yr);
+        draw_text(info_x + 180, info_y0 + 38, 0.44f, th->text_disabled, yr);
     }
     if (meta->genre[0])
-        draw_text(info_x, 88, 0.42f, th->text_disabled, meta->genre);
+        draw_text(info_x, info_y0 + 54, 0.42f, th->text_disabled, meta->genre);
 
-    /* Format + Piste sur une seule ligne */
     char info_line[48] = "";
     if (meta->format[0] && pl->count > 0 && pl->current >= 0)
         snprintf(info_line, 48, "%s  Piste %d/%d",
@@ -392,130 +889,169 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
         snprintf(info_line, 48, "Piste %d/%d", pl->current+1, pl->count);
     else if (meta->format[0])
         snprintf(info_line, 48, "%s", meta->format);
-    draw_text(info_x, 104, 0.40f, th->text_disabled, info_line);
+    draw_text(info_x, info_y0 + 70, 0.40f, th->text_disabled, info_line);
 
-    /* ── Barre de progression ──────────────────────────────── */
-    float pb_x=10, pb_y=128, pb_w=370, pb_h=8;
+    // ════════════════════════════════════════════════════════
+    // BARRE DE PROGRESSION  d3(1.0f) ← changer pour ajuster
+    //   pb_x = X (+ décalage 3D)
+    //   pb_y = Y
+    //   pb_w = largeur totale
+    //   pb_h = hauteur
+    // ════════════════════════════════════════════════════════
+    float pb_d = d3(1.0f);
+    float pb_x = 10 + pb_d;
+    float pb_y = 128;
+    float pb_w = 370;
+    float pb_h = 8;
+
     draw_rect(pb_x, pb_y, pb_w, pb_h, th->progress_bg);
     float pct = audio_get_position_pct();
-    if (pct > 0)
-        draw_rect(pb_x, pb_y, pb_w*pct, pb_h, th->progress_fill);
-    /* Curseur */
-    draw_rect(pb_x + pb_w*pct - 4, pb_y-2, 8, 12, th->text_primary);
+    if (pct > 0.f)
+        draw_rect(pb_x, pb_y, pb_w * pct, pb_h, th->progress_fill);
 
-    /* Temps */
-    char t_cur[10], t_tot[10];
+    // Curseur  d3(1.8f) ← plus en avant que la barre
+    float cur_d = d3(1.8f);
+    draw_rect(pb_x + pb_w*pct - 4 + (cur_d - pb_d),
+              pb_y - 3, 8, 14, th->text_primary);
+
+    char t_cur[12], t_tot[12];
     fmt_time(t_cur, audio_get_position());
     fmt_time(t_tot, audio_get_duration());
-    draw_text(pb_x,            pb_y+11, 0.44f, th->text_secondary, t_cur);
-    draw_text(pb_x+pb_w-30,   pb_y+11, 0.44f, th->text_secondary, t_tot);
+    draw_text(pb_x,         pb_y + 10, 0.44f, th->text_secondary, t_cur);
+    draw_text(pb_x+pb_w-30, pb_y + 10, 0.44f, th->text_secondary, t_tot);
 
-    /* Volume */
-    float vol = audio_get_volume();
-    draw_text(pb_x, pb_y+24, 0.40f, th->text_disabled, "VOL");
-    draw_rect(pb_x+26, pb_y+26, 120,     5, th->progress_bg);
-    draw_rect(pb_x+26, pb_y+26, 120*vol, 5, th->accent2);
-    /* Pourcentage volume */
+    // ── Volume  d3(0.0f) = plan neutre ───────────────────────
+    float vol   = audio_get_volume();
+    float vol_d = d3(0.f);
+    draw_text(pb_x + vol_d,       pb_y + 22, 0.40f, th->text_disabled, "VOL");
+    draw_rect(pb_x+26 + vol_d,    pb_y + 24, 120,     5, th->progress_bg);
+    draw_rect(pb_x+26 + vol_d,    pb_y + 24, 120*vol, 5, th->accent2);
     char vol_str[8];
     snprintf(vol_str, 8, "%d%%", (int)(vol*100));
-    draw_text(pb_x+150, pb_y+24, 0.40f, th->text_disabled, vol_str);
+    draw_text(pb_x+150 + vol_d,  pb_y + 22, 0.40f, th->text_disabled, vol_str);
 
-    /* ── Visualiseur ───────────────────────────────────────── */
-    float vx=8, vy=165, vw=384, vh=58;
-    draw_rect(vx-2, vy-2, vw+4, vh+4, th->bg_secondary);
+    // ════════════════════════════════════════════════════════
+    // VISUALISEUR  d3(0.6f) ← changer pour ajuster
+    //   vx = X (+ décalage 3D)
+    //   vy = Y
+    //   vw = largeur
+    //   vh = hauteur
+    // ════════════════════════════════════════════════════════
+    float vd = d3(0.6f);
+    float vx  = 8  + vd;
+    float vy  = 163;
+    float vw  = 384;
+    float vh  = 60;
+
+    draw_rect(vx - 2, vy - 2, vw + 4, vh + 4, th->bg_secondary);
 
     switch (ui->viz_style) {
         case VIZ_BARS:
-            draw_viz_bars(ui, vx, vy, vw, vh); break;
+            draw_viz_bars(ui, vx, vy, vw, vh);
+            break;
         case VIZ_WAVE:
-            draw_viz_wave(ui, vx, vy, vw, vh); break;
+            draw_viz_wave(ui, vx, vy, vw, vh);
+            break;
         case VIZ_CIRCLE:
-            draw_viz_circle(ui, vx+vw/2.f, vy+vh/2.f, vh/2.f-2); break;
-        default: break;
+            draw_viz_circle(ui, vx + vw/2.f, vy + vh/2.f, vh/2.f - 2);
+            break;
+        case VIZ_FIRE:
+            draw_viz_fire(ui, vx, vy, vw, vh);
+            break;
+        case VIZ_RAIN:
+            draw_viz_rain(ui, vx, vy, vw, vh);
+            break;
+        case VIZ_EQ:
+            draw_viz_eq(ui, vx, vy, vw, vh);
+            break;
+        default:
+            break;
     }
 
-    const char *viz_names[] = {"Barres","Onde","Cercle"};
-    draw_text(vx+vw-40, vy+vh+4, 0.38f, th->text_disabled,
-              viz_names[ui->viz_style]);
+    const char *viz_names[] = {"Barres","Onde","Cercle","Feu","Pluie","EQ"};
+    draw_text(vx + vw - 40, vy + vh + 4, 0.38f,
+              th->text_disabled, viz_names[ui->viz_style]);
 }
 
-/* ── Bottom screen ──────────────────────────────────────────── */
+// ============================================================
+// DRAW BOTTOM — écran du bas (pas d'effet 3D)
+// ============================================================
 void player_ui_draw_bottom(PlayerUI *ui, const AudioMetadata *meta,
                            const Playlist *pl)
 {
     Theme *th = current_theme;
-    draw_rect(0, 0, BOT_WIDTH, BOT_HEIGHT, th->bg_primary);
 
-    /* Header */
+    // Clear du TextBuf pour l'écran du bas
+    // (nécessaire car draw_top et draw_bottom sont des scènes séparées)
+    frame_begin();
+
+    draw_rect(0, 0, BOT_WIDTH, BOT_HEIGHT, th->bg_primary);
     draw_rect(0, 0, BOT_WIDTH, 26, th->bg_header);
     draw_text(8, 5, 0.52f, th->text_accent, "Controles");
 
-    /* Batterie - utilise MCUHWC pour valeur reelle (0-100) */
-    u8 batt_pct = 0;
-    u8 charging = 0;
-    MCUHWC_GetBatteryLevel(&batt_pct);  /* retourne 0-100 directement */
+    // Batterie
+    u8 batt_pct = 0, charging = 0;
+    MCUHWC_GetBatteryLevel(&batt_pct);
     PTMU_GetBatteryChargeState(&charging);
     int pct = (int)batt_pct;
     char bstr[16];
-    if (charging)
-        snprintf(bstr, 16, "BAT+ %d%%", pct);
-    else if (pct <= 5)
-        snprintf(bstr, 16, "BAT!! %d%%", pct);
-    else if (pct <= 20)
-        snprintf(bstr, 16, "BAT! %d%%", pct);
-    else
-        snprintf(bstr, 16, "BAT %d%%", pct);
+    if (charging)       snprintf(bstr, 16, "BAT+ %d%%", pct);
+    else if (pct <= 5)  snprintf(bstr, 16, "BAT!! %d%%", pct);
+    else if (pct <= 20) snprintf(bstr, 16, "BAT! %d%%", pct);
+    else                snprintf(bstr, 16, "BAT %d%%", pct);
     draw_text(BOT_WIDTH-65, 5, 0.40f,
         pct <= 20 ? th->accent2 : th->text_disabled, bstr);
 
-    /* Boutons visuels */
+    // Indication seek tactile (simple texte, pas de barre)
+    draw_text(90, 224, 0.42f, th->text_disabled, "< glisser ici pour avancer >");
+
+    // Boutons principaux
     float by = 36;
     struct { const char *lbl; float x; u32 col; } btns[] = {
-        {"<- Prec",    14,  th->text_secondary},
+        {"<- Prec",   14,  th->text_secondary},
         {"L+R Pause", 110, th->accent},
-        {"Suiv ->",    222, th->text_secondary},
+        {"Suiv ->",   222, th->text_secondary},
     };
     for (int i = 0; i < 3; i++) {
         draw_rect(btns[i].x, by, 80, 20, th->bg_secondary);
         draw_text(btns[i].x+4, by+4, 0.42f, btns[i].col, btns[i].lbl);
     }
     draw_rect(0, by+24, BOT_WIDTH, 1, th->border);
-
-    /* Ligne 2 */
     by += 32;
+
     draw_text(10,  by, 0.44f, th->text_secondary, "+- Volume");
     draw_text(110, by, 0.44f, th->text_secondary, "ZL/ZR +-10s");
     draw_text(222, by, 0.44f,
         pl->shuffle ? th->accent : th->text_disabled,
         pl->shuffle ? "Aleat ON" : "Aleat OFF");
-
-    /* Ligne 3 */
     by += 20;
+
     const char *rep_str[] = {"Repet: Non","Repet: x1","Repet: Tout"};
-    draw_text(10,  by, 0.44f,
+    draw_text(10, by, 0.44f,
         pl->repeat != REPEAT_NONE ? th->accent : th->text_disabled,
         rep_str[pl->repeat]);
-    const char *viz_n[] = {"Barres","Onde","Cercle"};
+    const char *viz_n[] = {"Barres","Onde","Cercle","Feu","Pluie","EQ Pro"};
     draw_text(180, by, 0.44f, th->text_secondary, viz_n[ui->viz_style]);
-
     draw_rect(0, by+18, BOT_WIDTH, 1, th->border);
-
-    /* Touches */
     by += 24;
+
     const char *keys[] = {
-        "A = Play/Pause",     "L+R = Play/Pause",
-        "X = Playlist",     "Y = Aleatoire",
+        "A = Play/Pause",    "L+R = Play/Pause",
+        "X = Playlist",      "Y = Aleatoire",
         "Select = Fichiers", "R = Changer Viz",
         "B = Retour",
     };
     for (int i = 0; i < 7; i++) {
         float kx = (i%2==0) ? 8 : 164;
-        float ky = by + (i/2)*16;
+        float ky  = by + (i/2)*16;
         draw_text(kx, ky, 0.38f, th->text_disabled, keys[i]);
     }
-
     (void)meta;
 }
+
+// ============================================================
+// UTILITAIRES
+// ============================================================
 
 void player_ui_cycle_viz(PlayerUI *ui)
 {

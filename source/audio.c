@@ -19,8 +19,8 @@
 
 #define NDSP_CHANNEL    0
 #define SAMPLE_RATE     44100
-#define SAMPLES_PER_BUF 16384  /* Double pour eviter underrun resampling */
-#define NUM_BUFS        6      /* 6 buffers = grande marge pour resampling */
+#define SAMPLES_PER_BUF 8192   /* Taille reduite pour moins de charge CPU */
+#define NUM_BUFS        8      /* 8 buffers = marge suffisante */
 #define BYTES_PER_SAMPLE 2
 #define CHANNELS        2
 #define TARGET_RATE     44100  /* Frequence cible pour le resampling */
@@ -82,6 +82,7 @@ typedef enum {
 
 static AudioState        s_state       = AUDIO_STOPPED;
 static float             s_volume      = 0.8f;
+static float             s_speed       = 1.0f;
 static AudioFormat       s_fmt         = FMT_UNKNOWN;
 static AudioMetadata     s_meta;
 static float             s_viz[EQ_BANDS]     = {0};
@@ -542,7 +543,7 @@ static void audio_thread(void *arg)
             if (needs_resample(s_sample_rate))
                 svcSleepThread(3000000LL);  /* 3ms pour freq non-native */
             else
-                svcSleepThread(10000000LL); /* 10ms pour 44100Hz natif */
+                svcSleepThread(8000000LL);  /* 8ms pour 44100Hz natif */
             continue;
         }
         if (s_seek_requested) do_seek();
@@ -869,6 +870,16 @@ int   audio_get_duration(void)     { return s_meta.duration_sec; }
 float audio_get_position_pct(void) { return s_meta.duration_sec > 0 ? (float)audio_get_position() / s_meta.duration_sec : 0.f; }
 void  audio_set_volume(float v)    { s_volume = v < 0.f ? 0.f : (v > 1.f ? 1.f : v); set_mix(s_volume); }
 float audio_get_volume(void)       { return s_volume; }
+
+void audio_set_speed(float speed)
+{
+    if (speed < 0.5f) speed = 0.5f;
+    if (speed > 2.0f) speed = 2.0f;
+    s_speed = speed;
+    /* Changer la frequence NDSP = changer la vitesse */
+    float new_rate = (float)TARGET_RATE * speed;
+    ndspChnSetRate(NDSP_CHANNEL, new_rate);
+}
 AudioState audio_get_state(void)   { return s_state; }
 bool  audio_is_finished(void)      { return s_state == AUDIO_STOPPED && s_meta.duration_sec > 0; }
 const AudioMetadata *audio_get_metadata(void) { return &s_meta; }

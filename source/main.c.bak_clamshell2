@@ -952,130 +952,54 @@ static void draw_splash_screen(void)
 }
 
 
-
 /* ============================================================
-   APT HOOK - re-applique LED apres fermeture/notification
-   ============================================================ */
-static aptHookCookie s_apt_cookie;
-static volatile bool s_force_led_refresh = false;
-
-static void apt_hook_callback(APT_HookType hook, void* param)
-{
-    (void)param;
-    switch (hook) {
-        case APTHOOK_ONWAKEUP:
-        case APTHOOK_ONRESTORE:
-            /* Console reouverte ou retour depuis HOME : refresh LED */
-            s_force_led_refresh = true;
-            break;
-        default:
-            break;
-    }
-}
-
-/* ============================================================
-   LED NOTIFICATION
-   - Utilise la couleur du theme actuel (current_theme->led_color)
-   - Pulse doucement quand l audio joue
-   - Eteinte sinon
+   GESTION LED VIOLETTE EN CLAMSHELL
+   Utilise la vraie API libctru : InfoLedPattern
    ============================================================ */
 static bool s_led_active = false;
 static u64  s_led_last_check = 0;
-static u32  s_led_last_color = 0;
 
-static void update_led(void)
+static void update_clamshell_led(void)
 {
+    /* Verifier toutes les 500ms */
     u64 now = osGetTime();
-
-    /* Si refresh force (wakeup/restore), reset l etat */
-    if (s_force_led_refresh) {
-        s_force_led_refresh = false;
-        s_led_active = false;  /* Force la re-application */
-        s_led_last_check = 0;
-    }
-
-    /* Check toutes les 500ms */
     if (now - s_led_last_check < 500) return;
     s_led_last_check = now;
 
     /* Etat desire */
     bool should_be_on = false;
-    if (g_settings.led_enabled) {
+    if (g_settings.led_violet) {
         AudioState st = audio_get_state();
-        if (st == AUDIO_PLAYING) should_be_on = true;
-    }
-
-    /* === DETECTION DES NOTIFICATIONS SYSTEME ===
-       On lit l etat actuel de la LED via MCUHWC_ReadRegister
-       Si une notification est en cours, on attend qu elle finisse */
-    static u32 s_notif_wait_until = 0;
-    static bool s_was_notif_active = false;
-
-    if (should_be_on) {
-        /* Lire l etat actuel de la LED (registre 0x2D = info LED state) */
-        u8 led_state = 0;
-        Result rc = MCUHWC_ReadRegister(0x28, &led_state, 1);
-
-        /* Si une notification est detectee (LED a un pattern non-null),
-           et que ce n est PAS notre LED, on attend
-           led_state != 0 et !s_led_active = quelqu un d autre a pris la LED */
-        if (R_SUCCEEDED(rc) && led_state != 0 && !s_led_active) {
-            /* Notification active : on attend 5 sec qu elle finisse */
-            if (!s_was_notif_active) {
-                s_was_notif_active = true;
-                s_notif_wait_until = (u32)(now + 5000); /* attendre 5 sec */
-            }
-            /* Pas encore fini d attendre ? */
-            if (now < s_notif_wait_until) {
-                return; /* Skip cette frame, laisser la notif tranquille */
-            }
-            /* La notif devrait etre finie, on reprend la main */
-            s_was_notif_active = false;
-        } else {
-            s_was_notif_active = false;
+        if (st == AUDIO_PLAYING && g_settings.clamshell_playback) {
+            should_be_on = true;
         }
     }
 
-    /* Re-applique si la couleur du theme a change */
-    u32 cur_color = current_theme->led_color;
-    bool color_changed = (s_led_active && cur_color != s_led_last_color);
-
-    /* Re-application periodique pour reprendre apres notifications
-       (mais moins agressif maintenant : toutes les 5 sec) */
-    static u64 s_led_force_refresh_time = 0;
-    bool force_refresh = false;
-    if (should_be_on && (now - s_led_force_refresh_time >= 5000)) {
-        s_led_force_refresh_time = now;
-        force_refresh = true;
-    }
-
-    if ((should_be_on && !s_led_active) || color_changed || force_refresh) {
+    /* Allumer LED violette */
+    if (should_be_on && !s_led_active) {
         InfoLedPattern p = {0};
-        p.delay = 0x10;
-        p.smoothing = 0x40;
-        p.loopDelay = 0x00;
-        p.blinkSpeed = 0x00;
+        p.delay = 0x10;       /* 16ms par step (1s = 0x10) */
+        p.smoothing = 0x40;   /* transitions douces */
+        p.loopDelay = 0x00;   /* loop infini */
+        p.blinkSpeed = 0x00;  /* pas de blink (on utilise smoothing) */
 
-        u8 base_r = (cur_color >> 0)  & 0xff;
-        u8 base_g = (cur_color >> 8)  & 0xff;
-        u8 base_b = (cur_color >> 16) & 0xff;
-
-        /* Pulsation : 32 steps sinusoidaux */
+        /* Pulsation violette : 32 steps sinusoidaux */
         for (int i = 0; i < 32; i++) {
             float t = (float)i / 32.f;
             float intensity = 0.3f + 0.7f * (0.5f + 0.5f * sinf(t * 6.28318f));
-            p.redPattern[i]   = (u8)(base_r * intensity);
-            p.greenPattern[i] = (u8)(base_g * intensity);
-            p.bluePattern[i]  = (u8)(base_b * intensity);
+            p.redPattern[i]   = (u8)(128 * intensity);  /* Violet R */
+            p.greenPattern[i] = 0;                      /* Violet G */
+            p.bluePattern[i]  = (u8)(255 * intensity);  /* Violet B */
         }
         MCUHWC_SetInfoLedPattern(&p);
         s_led_active = true;
-        s_led_last_color = cur_color;
     }
+    /* Eteindre LED */
     else if (!should_be_on && s_led_active) {
         InfoLedPattern off = {0};
         off.delay = 0x10;
-        off.loopDelay = 0xFF;
+        off.loopDelay = 0xFF;  /* joue une seule fois */
+        /* Patterns tout a zero = LED off */
         MCUHWC_SetInfoLedPattern(&off);
         s_led_active = false;
     }
@@ -1130,8 +1054,8 @@ int main(int argc, char *argv[])
     mcuHwcInit();
     srand((unsigned)osGetTime());
 
-    /* Enregistrer hook APT pour refresh LED apres wakeup/restore */
-    aptHook(&s_apt_cookie, apt_hook_callback, NULL);
+    /* === Lecture clamshell (continue audio quand console fermee) === */
+    aptSetSleepAllowed(!g_settings.clamshell_playback);
     APT_CheckNew3DS(&g_is_new3ds); /* détection modèle une seule fois */
     dbg("step 4: services ok");
 
@@ -1252,8 +1176,8 @@ int main(int argc, char *argv[])
 
         player_ui_update(&g_player_ui, audio_get_metadata(), dt);
 
-        /* Update LED notification */
-        update_led();
+        /* Gestion LED violette clamshell */
+        update_clamshell_led();
 
         /* Sauvegarde toutes les 2 min en arriere-plan */
         if (++save_timer > 7200) { /* 2 min a 60fps */
@@ -1284,16 +1208,13 @@ int main(int argc, char *argv[])
     settings_save_sync();
     dbg("cleanup: save done");
 
-    /* Eteindre LED */
+    /* Eteindre LED notification */
     {
         InfoLedPattern off = {0};
         off.delay = 0x10;
         off.loopDelay = 0xFF;
         MCUHWC_SetInfoLedPattern(&off);
     }
-
-    /* Retirer hook APT */
-    aptUnhook(&s_apt_cookie);
 
     player_ui_exit(&g_player_ui);
     audio_exit();

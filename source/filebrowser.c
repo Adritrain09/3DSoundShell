@@ -1,6 +1,7 @@
 // filebrowser.c
 
 #include "filebrowser.h"
+#include "main.h"
 #include "favorites.h"
 #include "theme.h"
 #include <dirent.h>
@@ -220,6 +221,9 @@ void fb_draw_bottom(const FileBrowser *fb)
     // Fleche bas : Y=218 a 240, X=300 a 320
     draw_rect(300, 218, 20, 22, th->bg_secondary);
     draw_text(304, 221, 0.50f, th->text_primary, "v");
+
+    /* Notif MAJ temporaire */
+    draw_update_notif_timed();
 
     // Scrollbar
     if(fb->count > fb->visible_rows) {
