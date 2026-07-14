@@ -108,34 +108,35 @@ Lancez via Homebrew Launcher
 Créez un fichier `.ini` dans `sdmc:/3DSoundShell/themes/` :
 
 ```ini
-; Theme New 2DS Blue Violet — 3DSoundShell
+; Theme Cyber Green — 3DSoundShell
 ; Format: 0xRRGGBBFF
 
-name=New 2DS Blue Violet
-bg_primary=0x25114dff
-bg_secondary=0x1a0b36ff
-bg_header=0x110524ff
-bg_selected=0x491f8aff
-bg_playing=0x38146eff
-text_primary=0xd6c2ffff //nom music + barre prog
-text_secondary=0xa385e0ff //info pri
-text_accent=0xbb00ffff //3DSoundShell
-text_disabled=0x51387dff //info sec
-accent=0x6c62bfff //PLAY, info sec et Dossier indic
-accent2=0x612cb0ff
-border=0x441b80ff
-scrollbar=0x351266ff
-progress_bg=0x160730ff
-progress_fill=0x1500ceff
-eq_bar=0xd6c2ffff
-eq_handle=0xf3ebffff
+name=Cyber Green
+bg_primary=0x1a1a1aff
+bg_secondary=0x121212ff
+bg_header=0x0a0a0aff
+bg_selected=0x2b2b2bff
+bg_playing=0x222222ff
+text_primary=0x39ff14ff
+text_secondary=0x28b80eff
+text_accent=0x00ffffff
+text_disabled=0x1a5e11ff
+accent=0x0d0d0dff
+accent2=0x404040ff
+border=0x333333ff
+scrollbar=0x262626ff
+progress_bg=0x0d0d0dff
+progress_fill=0x39ff14ff
+eq_bar=0x39ff14ff
+eq_handle=0xd8ffd1ff
 eq_bar_selected=0xffd700ff
 eq_bar_positive=0x00cc44ff
 eq_bar_negative=0xff2244ff
-eq_zero_line=0x441b80ff
-eq_bg=0x0c021aff
-vis_start=0x006effff
-vis_end=0xff00ffff
+eq_zero_line=0x333333ff
+eq_bg=0x050505ff
+vis_start=0x39ff14ff
+vis_end=0x00ffffff
+led_color=0x00e204ff
 ```
 
 Les couleurs sont au format `0xRRGGBBFF`.
