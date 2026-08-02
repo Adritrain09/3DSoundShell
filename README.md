@@ -104,7 +104,8 @@ Lancez via Homebrew Launcher
 
 ## 🎨 Thèmes personnalisés
 
-Créez un fichier `.ini` dans `sdmc:/3DSoundShell/themes/` :
+Pour avoir des themes custom, il vous faut un fichier au format comme indiquer si dessous en `.ini`, puis le metre dans `sdmc:/3DSoundShell/themes/`
+il est possible de metre jusqu'a 16 themes dans le fichier, au dela les themes custom ne serons plus pris on compte:
 
 ```ini
 ; Theme Cyber Green — 3DSoundShell
