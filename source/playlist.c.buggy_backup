@@ -4,6 +4,7 @@
 #include "main.h"
 #include "favorites.h"
 #include "theme.h"
+#include "i18n.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,42 +38,6 @@ static void draw_text(float x,float y,float sz,u32 c,const char *t)
     C2D_TextParse(&tx,g_textbuf,t);
     C2D_TextOptimize(&tx);
     C2D_DrawText(&tx,C2D_AlignLeft|C2D_WithColor,x,y,0,sz,sz,c);
-}
-
-/* V0.97 : Tri alphabetique de la playlist par titre */
-static int pl_cmp_alpha(const void *a, const void *b) {
-    const PlaylistEntry *ea = (const PlaylistEntry*)a;
-    const PlaylistEntry *eb = (const PlaylistEntry*)b;
-    /* V0.97 : trier par nom de fichier (comme le browser), pas par title
-       (le title peut etre le meme si extraite de metadonnees) */
-    const char *na = strrchr(ea->path, '/');
-    const char *nb = strrchr(eb->path, '/');
-    na = na ? na + 1 : ea->path;
-    nb = nb ? nb + 1 : eb->path;
-    return strcasecmp(na, nb);
-}
-
-static void pl_sort_alpha(Playlist *pl) {
-    if (pl->count < 2) return;
-    /* Sauvegarder le path courant pour retrouver l index apres tri */
-    char cur_path[MAX_PATH] = {0};
-    if (pl->current >= 0 && pl->current < pl->count)
-        strncpy(cur_path, pl->items[pl->current].path, MAX_PATH-1);
-
-    qsort(pl->items, pl->count, sizeof(PlaylistEntry), pl_cmp_alpha);
-
-    /* Retrouver l index apres tri */
-    if (cur_path[0]) {
-        for (int i = 0; i < pl->count; i++)
-            if (strcmp(pl->items[i].path, cur_path) == 0) {
-                pl->current = i;
-                break;
-            }
-    }
-
-    /* Reset shuffle_order lineaire */
-    for (int i = 0; i < pl->count; i++) pl->shuffle_order[i] = i;
-    if (pl->shuffle) pl_rebuild_shuffle(pl);
 }
 
 // ─── Init ─────────────────────────────────────────────────────
@@ -112,12 +77,46 @@ void pl_add(Playlist *pl, const char *path, const char *title)
     strncpy(e->title, title, MAX_FILENAME-1);
     e->duration_sec = 0;
     if (pl->current < 0) pl->current = 0;
+    /* V0.97 : shuffle_order lineaire par defaut (0,1,2,...) - evite indices non init */
+    pl->shuffle_order[pl->count] = pl->count;
     pl->count++;
     pl->use_favorites = false;
-    if (pl->shuffle) pl_rebuild_shuffle(pl);
+    /* V0.97 : NE PAS rebuild shuffle a chaque ajout (fait a la fin par pl_add_dir) */
 }
 
 // ─── Add all audio files from a directory ────────────────────
+/* V0.97 : Tri alphabetique de la playlist par titre */
+static int pl_cmp_alpha(const void *a, const void *b) {
+    const PlaylistEntry *ea = (const PlaylistEntry*)a;
+    const PlaylistEntry *eb = (const PlaylistEntry*)b;
+    return strcasecmp(ea->title, eb->title);
+}
+
+static void pl_sort_alpha(Playlist *pl) {
+    if (pl->count < 2) return;
+    /* Sauvegarder le path courant pour retrouver l index apres tri */
+    char cur_path[MAX_PATH] = {0};
+    if (pl->current >= 0 && pl->current < pl->count) {
+        strncpy(cur_path, pl->items[pl->current].path, MAX_PATH-1);
+    }
+
+    qsort(pl->items, pl->count, sizeof(PlaylistEntry), pl_cmp_alpha);
+
+    /* Retrouver l index apres tri */
+    if (cur_path[0]) {
+        for (int i = 0; i < pl->count; i++) {
+            if (strcmp(pl->items[i].path, cur_path) == 0) {
+                pl->current = i;
+                break;
+            }
+        }
+    }
+
+    /* Reset shuffle_order lineaire (0,1,2,...) */
+    for (int i = 0; i < pl->count; i++) pl->shuffle_order[i] = i;
+    if (pl->shuffle) pl_rebuild_shuffle(pl);
+}
+
 void pl_add_dir(Playlist *pl, const char *dir_path)
 {
     DIR *d = opendir(dir_path);
@@ -131,7 +130,7 @@ void pl_add_dir(Playlist *pl, const char *dir_path)
     }
     closedir(d);
     pl->use_favorites = false;
-    /* V0.97 : TRIER par nom pour que l ordre playlist = ordre affiche */
+    /* V0.97 : TRIER par nom alphabetique (comme dans l explorateur !) */
     pl_sort_alpha(pl);
 }
 
@@ -180,6 +179,27 @@ void pl_rebuild_shuffle(Playlist *pl)
 // ─── Navigation ───────────────────────────────────────────────
 int pl_next(Playlist *pl)
 {
+    FILE *_fn = fopen("sdmc:/3DSoundShell/pl_debug.log", "a");
+    if (_fn) {
+        fprintf(_fn, "pl_next: current=%d count=%d shuffle=%d repeat=%d\n",
+            pl->current, pl->count, pl->shuffle, pl->repeat);
+        /* V0.97 debug : afficher shuffle_order si shuffle actif */
+        if (pl->shuffle && pl->count <= 20) {
+            fprintf(_fn, "  shuffle_order: ");
+            for (int i = 0; i < pl->count; i++)
+                fprintf(_fn, "%d ", pl->shuffle_order[i]);
+            fprintf(_fn, "\n");
+        }
+        /* Trouver pos actuel dans shuffle_order */
+        if (pl->shuffle) {
+            int pos = -1;
+            for (int i = 0; i < pl->count; i++)
+                if (pl->shuffle_order[i] == pl->current) { pos = i; break; }
+            fprintf(_fn, "  current pos in shuffle_order: %d\n", pos);
+        }
+        fclose(_fn);
+    }
+
     if (pl->count <= 0) return -1;
     if (pl->repeat == REPEAT_ONE) return pl->current;
 
@@ -199,11 +219,19 @@ int pl_next(Playlist *pl)
         }
     }
     pl->current = next;
+
     return next;
 }
 
 int pl_prev(Playlist *pl)
 {
+    FILE *_f = fopen("sdmc:/3DSoundShell/pl_debug.log", "a");
+    if (_f) {
+        fprintf(_f, "pl_prev: current=%d count=%d shuffle=%d repeat=%d\n",
+            pl->current, pl->count, pl->shuffle, pl->repeat);
+        fclose(_f);
+    }
+
     if (pl->count <= 0) return -1;
     if (pl->repeat == REPEAT_ONE) return pl->current;
     int prev;
@@ -218,11 +246,23 @@ int pl_prev(Playlist *pl)
         if (prev < 0) prev = (pl->repeat == REPEAT_ALL) ? pl->count-1 : 0;
     }
     pl->current = prev;
+
+    FILE *_ff = fopen("sdmc:/3DSoundShell/pl_debug.log", "a");
+    if (_ff) {
+        fprintf(_ff, "  -> prev=%d\n", prev);
+        fclose(_ff);
+    }
+
     return prev;
 }
 
 int pl_jump(Playlist *pl, int idx)
 {
+    FILE *_f = fopen("sdmc:/3DSoundShell/pl_debug.log", "a");
+    if (_f) {
+        fprintf(_f, "pl_jump: idx=%d (was current=%d)\n", idx, pl->current);
+        fclose(_f);
+    }
     if (idx < 0 || idx >= pl->count) return -1;
     pl->current = idx;
     return idx;
@@ -277,11 +317,11 @@ void pl_draw_top(const Playlist *pl)
 
     if (pl->count == 0) {
         if (pl->use_favorites) {
-            draw_text(30, 100, 0.52f, th->text_disabled, "Aucun favori !");
-            draw_text(20, 125, 0.45f, th->text_disabled, "Ajoute des favoris avec L");
-            draw_text(20, 145, 0.45f, th->text_disabled, "dans le navigateur de fichiers");
+            draw_text(30, 100, 0.52f, th->text_disabled, T("Aucun favori !"));
+            draw_text(20, 125, 0.45f, th->text_disabled, T("Ajoute des favoris avec L"));
+            draw_text(20, 145, 0.45f, th->text_disabled, T("dans le navigateur de fichiers"));
         } else {
-            draw_text(50, 110, 0.55f, th->text_disabled, "Playlist vide");
+            draw_text(50, 110, 0.55f, th->text_disabled, T("Playlist vide"));
         }
         return;
     }
@@ -298,7 +338,7 @@ void pl_draw_top(const Playlist *pl)
     /* Piste en cours */
     if (pl->current >= 0 && pl->current < pl->count) {
         draw_rect(0, 50, TOP_WIDTH, 2, th->accent);
-        draw_text(10, 58, 0.52f, th->text_accent, "En lecture :");
+        draw_text(10, 58, 0.52f, th->text_accent, T("En lecture :"));
         char buf[60];
         snprintf(buf, 60, "%s", pl->items[pl->current].title);
         draw_text(10, 75, 0.5f, th->text_primary, buf);
@@ -326,7 +366,7 @@ void pl_draw_bottom(Playlist *pl)
     if (pl->count == 0) {
         if (pl->use_favorites)
             draw_text(10, 80, 0.48f, th->text_disabled,
-                "Aucun favori - appuie sur L");
+                T(T("Aucun favori - appuie sur L")));
         return;
     }
 

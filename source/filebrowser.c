@@ -4,6 +4,8 @@
 #include "main.h"
 #include "favorites.h"
 #include "theme.h"
+#include "i18n.h"
+#include "preview.h"
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>
@@ -113,11 +115,11 @@ void fb_cycle_sort(FileBrowser *fb)
 const char *fb_sort_name(const FileBrowser *fb)
 {
     switch(s_sort_mode) {
-        case SORT_NAME_AZ: return "Nom A-Z";
-        case SORT_NAME_ZA: return "Nom Z-A";
-        default:           return "Nom A-Z";
+        case SORT_NAME_AZ: return T("Nom A-Z");
+        case SORT_NAME_ZA: return T("Nom Z-A");
+        default:           return T("Nom A-Z");
     }
-    return "Nom A-Z";
+    return T("Nom A-Z");
 }
 
 void fb_select_next(FileBrowser *fb)
@@ -125,12 +127,21 @@ void fb_select_next(FileBrowser *fb)
     if(fb->selected < fb->count-1) fb->selected++;
     if(fb->selected >= fb->scroll_offset + fb->visible_rows)
         fb->scroll_offset++;
+    if (fb->selected >= 0 && fb->selected < fb->count) {
+        FileEntry *fe = &fb->entries[fb->selected];
+        
+        if (fe->is_audio) preview_request(fe->full_path);
+    }
 }
 void fb_select_prev(FileBrowser *fb)
 {
     if(fb->selected > 0) fb->selected--;
     if(fb->selected < fb->scroll_offset)
         fb->scroll_offset--;
+    if (fb->selected >= 0 && fb->selected < fb->count) {
+        FileEntry *fe = &fb->entries[fb->selected];
+        if (fe->is_audio) preview_request(fe->full_path);
+    }
 }
 
 // ─── Drawing helpers ──────────────────────────────────────────
@@ -149,25 +160,151 @@ static void draw_text(float x,float y,float sz,u32 col,const char *txt)
     C2D_DrawText(&t,C2D_AlignLeft|C2D_WithColor,x,y,0,sz,sz,col);
 }
 
-// Top screen: show current path + big title
+// Top screen: infos du fichier selectionne (V0.95)
 void fb_draw_top(const FileBrowser *fb)
 {
     Theme *th = current_theme;
-    // Header bar
+
     draw_rect(0,0,TOP_WIDTH,26,th->bg_header);
-    draw_text(8,5,0.55f,th->text_accent,"3DSoundShell  —  File Browser");
-    // Path
+    draw_text(8,5,0.55f,th->text_accent,"3DSoundShell  -  File Browser");
+
     draw_rect(0,26,TOP_WIDTH,14,th->bg_secondary);
-    char pathbuf[56];
-    snprintf(pathbuf,56,"  %s",fb->cwd);
+    char pathbuf[80];
+    snprintf(pathbuf,80,"  %s",fb->cwd);
     draw_text(4,28,0.43f,th->text_secondary,pathbuf);
-    // Big hint
-    draw_text(10,120,0.5f,th->text_disabled,"A = Open   B = Back    Select = Reglage");
-    draw_text(10,140,0.5f,th->text_disabled,"Start = Player    L = Favori");
-    /* Tri actuel */
+
+    float info_x = 210, info_y = 44;
+    float info_w = TOP_WIDTH - info_x - 5, info_h = 156;
+
+    draw_rect(info_x, info_y, info_w, info_h, th->bg_secondary);
+    draw_rect(info_x, info_y, info_w, 16,      th->bg_header);
+    draw_text(info_x + 4, info_y + 2, 0.42f, th->text_accent, T("Infos"));
+
+    const FileEntry *fe = NULL;
+    if (fb->count > 0 && fb->selected >= 0 && fb->selected < fb->count)
+        fe = &fb->entries[fb->selected];
+
+    if (!fe) {
+        draw_text(info_x + 8, info_y + 22, 0.38f, th->text_disabled,
+                  T("Dossier vide"));
+    } else if (fe->is_dir) {
+        draw_text(info_x + 8, info_y + 22, 0.38f, th->text_secondary,
+                  T("[Dossier]"));
+        char n[24]; snprintf(n, 24, "%s", fe->name);
+        draw_text(info_x + 8, info_y + 40, 0.38f, th->text_primary, n);
+    } else if (!fe->is_audio) {
+        draw_text(info_x + 8, info_y + 22, 0.38f, th->text_disabled,
+                  T("Non audio"));
+        char n[24]; snprintf(n, 24, "%s", fe->name);
+        draw_text(info_x + 8, info_y + 40, 0.36f, th->text_secondary, n);
+    } else {
+        const PreviewInfo *pv = preview_get(fe->full_path);
+
+        if (!pv || !pv->loaded) {
+            draw_text(info_x + 8, info_y + 22, 0.38f, th->text_disabled,
+                      T("Chargement..."));
+            char n[24]; snprintf(n, 24, "%s", fe->name);
+            draw_text(info_x + 8, info_y + 40, 0.36f, th->text_secondary, n);
+        } else if (!pv->valid) {
+            draw_text(info_x + 8, info_y + 22, 0.38f, th->accent2,
+                      T("Erreur lecture"));
+        } else {
+            float ty = info_y + 20;
+            float cx = info_x + 6, cy = ty, cs = 60;
+
+            if (pv->has_cover && pv->cover_uploaded) {
+                C2D_Image img = {
+                    (C3D_Tex*)&pv->cover_tex,
+                    (Tex3DS_SubTexture*)&pv->cover_subtex
+                };
+                float sx = cs / (float)pv->cover_subtex.width;
+                float sy = cs / (float)pv->cover_subtex.height;
+                C2D_DrawImageAt(img, cx, cy, 0, NULL, sx, sy);
+                draw_rect(cx-1, cy-1, cs+2, 1,  th->accent);
+                draw_rect(cx-1, cy+cs, cs+2, 1, th->accent);
+                draw_rect(cx-1, cy-1, 1, cs+2,  th->accent);
+                draw_rect(cx+cs, cy-1, 1, cs+2, th->accent);
+            } else {
+                draw_rect(cx, cy, cs, cs, th->bg_primary);
+                draw_rect(cx, cy, cs, 1,  th->border);
+                draw_rect(cx, cy+cs-1, cs, 1, th->border);
+                draw_rect(cx, cy, 1, cs,  th->border);
+                draw_rect(cx+cs-1, cy, 1, cs, th->border);
+                draw_text(cx + 25, cy + 24, 0.44f, th->text_disabled, "?");
+            }
+
+            float tx = info_x + 72;
+            char buf[64];
+
+            snprintf(buf, 20, "%.18s", pv->title);
+            draw_text(tx, ty, 0.38f, th->text_primary, buf);
+            snprintf(buf, 20, "%.18s", pv->artist);
+            draw_text(tx, ty + 14, 0.34f, th->text_accent, buf);
+            snprintf(buf, 20, "%.18s", pv->album);
+            draw_text(tx, ty + 28, 0.32f, th->text_secondary, buf);
+
+            if (pv->year > 0) {
+                snprintf(buf, 16, "%d", pv->year);
+                draw_text(tx, ty + 42, 0.32f, th->text_disabled, buf);
+            }
+
+            float dy = cy + cs + 6;
+
+            snprintf(buf, 32, "Format: %s", pv->format);
+            draw_text(info_x + 6, dy, 0.34f, th->accent2, buf);
+            dy += 12;
+
+            if (pv->duration_sec > 0) {
+                snprintf(buf, 32, "Duree: %d:%02d",
+                    pv->duration_sec / 60, pv->duration_sec % 60);
+                draw_text(info_x + 6, dy, 0.34f, th->text_secondary, buf);
+                dy += 12;
+            }
+
+            if (pv->file_size > 0) {
+                double mb = (double)pv->file_size / (1024.0 * 1024.0);
+                if (mb >= 1.0)
+                    snprintf(buf, 32, "Taille: %.1f Mo", mb);
+                else
+                    snprintf(buf, 32, "Taille: %.0f Ko",
+                             (double)pv->file_size / 1024.0);
+                draw_text(info_x + 6, dy, 0.34f, th->text_secondary, buf);
+                dy += 12;
+            }
+
+            if (pv->channels > 0) {
+                snprintf(buf, 32, "%s",
+                    pv->channels == 2 ? "Stereo" : "Mono");
+                draw_text(info_x + 6, dy, 0.34f, th->text_secondary, buf);
+                dy += 12;
+            }
+
+            if (pv->bitrate_kbps > 0) {
+                snprintf(buf, 32, "Bitrate: %d kbps", pv->bitrate_kbps);
+                draw_text(info_x + 6, dy, 0.34f, th->text_secondary, buf);
+                dy += 12;
+            }
+
+            if (pv->genre[0]) {
+                snprintf(buf, 32, "%.20s", pv->genre);
+                draw_text(info_x + 6, dy, 0.32f, th->text_disabled, buf);
+            }
+        }
+    }
+
+    draw_text(10, 60,  0.42f, th->text_primary,   T("Navigation"));
+    draw_text(10, 76,  0.38f, th->text_disabled,  T("A = Ouvrir"));
+    draw_text(10, 90,  0.38f, th->text_disabled,  T("B = Retour"));
+    draw_text(10, 104, 0.38f, th->text_disabled,  T("Start = Lecteur"));
+    draw_text(10, 118, 0.38f, th->text_disabled,  T("Select = Reglages"));
+    draw_text(10, 132, 0.38f, th->text_disabled,  T("L = Favori"));
+    draw_text(10, 146, 0.38f, th->text_disabled,  T("R = Trier"));
+    draw_text(10, 160, 0.38f, th->text_disabled,  T("X = Ajouter playlist"));
+    draw_text(10, 174, 0.38f, th->text_disabled,  T("Y = Ajouter dossier"));
+
     char sort_info[32];
-    snprintf(sort_info, 32, "Tri: %s  [R]", fb_sort_name(fb));
-    draw_text(10, 160, 0.45f, th->text_accent, sort_info);
+    snprintf(sort_info, 32, "%s: %s", T("Tri"), fb_sort_name(fb));
+    draw_text(10, 196, 0.42f, th->text_accent, sort_info);
 }
 
 // Bottom screen: scrollable file list
@@ -177,7 +314,7 @@ void fb_draw_bottom(const FileBrowser *fb)
     draw_rect(0,0,BOT_WIDTH,BOT_HEIGHT,th->bg_primary);
     // Header row
     draw_rect(0,0,BOT_WIDTH,LIST_Y,th->bg_header);
-    draw_text(6,7,0.52f,th->text_primary,"Files");
+    draw_text(6,7,0.52f,th->text_primary,T("Fichiers"));
 
     int end = fb->scroll_offset + fb->visible_rows;
     if(end > fb->count) end = fb->count;

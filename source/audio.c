@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <3ds.h>
+#include "settings.h"
 
 #define DR_FLAC_IMPLEMENTATION
 #include "dr_flac.h"
@@ -86,6 +87,31 @@ static float             s_speed       = 1.0f;
 static AudioFormat       s_fmt         = FMT_UNKNOWN;
 static AudioMetadata     s_meta;
 static float             s_viz[EQ_BANDS]     = {0};
+static volatile bool     s_viz_forced_off = false; /* V0.96 : force off (mode eco) */
+
+
+
+/* V0.97 : Crossfade - buffer PCM precache de la piste suivante */
+#define XFADE_CHANNEL    1  /* canal NDSP separe */
+#define XFADE_MAX_SEC    10  /* V0.97 : marge pour couvrir chargement piste 2 */
+#define XFADE_MAX_SAMPLES (XFADE_MAX_SEC * SAMPLE_RATE)
+static s16      *s_xfade_buf = NULL;
+static int       s_xfade_total_samples = 0;
+static volatile int s_xfade_play_pos = 0;  /* position lecture dans le buffer */
+static char      s_xfade_path[512] = {0};
+static bool      s_xfade_active = false;
+static ndspWaveBuf s_xfade_wbuf;
+static LightLock s_xfade_lock;
+static bool      s_xfade_lock_init = false;
+static Thread    s_xfade_precache_thread = NULL;
+static char      s_xfade_precache_pending[512] = {0};
+static int       s_xfade_precache_pending_dur = 5;
+static volatile bool s_xfade_precache_running = false;
+
+/* V0.97 : Buffer circulaire pour l oscilloscope (256 samples mono) */
+static float             s_oscillo_buf[256] = {0};
+static volatile int      s_oscillo_idx = 0;
+static volatile bool     s_fft_needed        = false; /* V0.95 opti Old 3DS */
 static float             s_viz_fft[EQ_BANDS] = {0};
 
 static ndspWaveBuf       s_wbufs[NUM_BUFS];
@@ -386,12 +412,13 @@ static void eq_update_filters(float sr)
     }
 }
 
+/* Cache l etat EQ actif pour eviter de checker les 8 bandes a chaque appel */
+static volatile bool s_eq_active_cache = false;
+
 static void apply_eq(s16 *buf, int pairs)
 {
-    bool eq_active = false;
-    for (int b = 0; b < EQ_BANDS; b++)
-        if (s_eq_gains[b] != 0.f) { eq_active = true; break; }
-    if (!eq_active) return;
+    /* OPTI OLD 3DS : sortie ultra-rapide si EQ inactif (cache mis a jour par audio_eq_set_gain) */
+    if (!s_eq_active_cache) return;
     eq_update_filters((float)s_sample_rate);
     for (int b = 0; b < EQ_BANDS; b++) {
         if (s_eq_gains[b] == 0.f) continue;
@@ -462,7 +489,10 @@ static void update_viz(const s16 *buf, int pairs)
     if (!s_hann_init) fft_init_hann();
     int n = pairs < FFT_SIZE ? pairs : FFT_SIZE;
 
-    /* FFT pour VIZ_EQ */
+
+    /* FFT pour VIZ_EQ - OPTI: skip si pas demandee (economie ~15% CPU Old 3DS) */
+    if (!s_fft_needed) goto skip_fft;
+
     for (int i = 0; i < n; i++) {
         float l = buf[i*2]   / 32767.f;
         float r = buf[i*2+1] / 32767.f;
@@ -501,6 +531,7 @@ static void update_viz(const s16 *buf, int pairs)
         s_viz_fft[b] += (energy - s_viz_fft[b]) * spd;
     }
 
+    skip_fft:
     /* RMS pour Barres/Onde/Cercle */
     int bs2 = n / EQ_BANDS;
     if (bs2 < 1) bs2 = 1;
@@ -577,13 +608,30 @@ static void audio_thread(void *arg)
                                 * (float)s_sample_rate / (float)TARGET_RATE);
         else
             s_samples_played += pairs;
+
         apply_eq(pcm, pairs);
         /* Viz calculee 1 buffer sur 3 pour reduire charge CPU
            Changer 3 → 2 pour plus de reactivite viz (mais plus de CPU)
            Changer 3 → 4 pour moins de charge CPU (viz moins reactive) */
+        /* V0.97 : Toujours mettre a jour le buffer oscilloscope (rapide, non FFT) */
+        if (g_settings.viz_enabled && !s_viz_forced_off) {
+            int step = pairs / 256;
+            if (step < 1) step = 1;
+            int oi = 0;
+            for (int i = 0; i < pairs && oi < 256; i += step, oi++) {
+                float l = pcm[i*2]   / 32767.f;
+                float r = pcm[i*2+1] / 32767.f;
+                s_oscillo_buf[oi] = (l + r) * 0.5f;
+            }
+            s_oscillo_idx = oi;
+        }
+
         viz_counter++;
-        if (viz_counter >= 4) {
+        /* V0.96 : FFT/RMS lourds - fait 1 buffer sur 8 pour economie CPU */
+        if (g_settings.viz_enabled && !s_viz_forced_off && viz_counter >= 8) {
             update_viz(pcm, pairs);
+            viz_counter = 0;
+        } else if (viz_counter >= 8) {
             viz_counter = 0;
         }
         if (s_volume != 1.0f) {
@@ -646,6 +694,9 @@ void audio_exit(void)
     if (s_mpg)      { mpg123_close(s_mpg); mpg123_delete(s_mpg); s_mpg = NULL; }
     if (s_opus)     { op_free(s_opus);              s_opus     = NULL; }
     free_cover(); mpg123_exit();
+    /* V0.97 : cleanup crossfade */
+    audio_xfade_stop();
+
     if (s_pcm_buf) { linearFree(s_pcm_buf); s_pcm_buf = NULL; }
     ndspExit();
 }
@@ -653,12 +704,10 @@ void audio_exit(void)
 Result audio_load(const char *path)
 {
     audio_lock_init();
-    { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
-      if(_f){fprintf(_f,"audio_load START: %s\n",path);fclose(_f);} }
+    
     LightLock_Lock(&s_audio_lock);
     audio_stop();
-    { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
-      if(_f){fprintf(_f,"audio_load: apres stop\n");fclose(_f);} }
+    
     memset(&s_meta, 0, sizeof(s_meta));
     meta_from_filename(path);
     s_fmt = detect_fmt(path);
@@ -781,11 +830,9 @@ void audio_stop(void)
 {
     s_state = AUDIO_STOPPED;
     ndspChnWaveBufClear(NDSP_CHANNEL);
-    { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
-      if(_f){fprintf(_f,"audio_stop: avant sleep\n");fclose(_f);} }
+    
     svcSleepThread(16000000LL);
-    { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
-      if(_f){fprintf(_f,"audio_stop: apres sleep\n");fclose(_f);} }
+    
     if (s_vorbis)   { stb_vorbis_close(s_vorbis); s_vorbis   = NULL; }
     if (s_flac)     { drflac_close(s_flac);        s_flac     = NULL; }
     if (s_wav_open) { drwav_uninit(&s_wav);         s_wav_open = false; }
@@ -876,27 +923,54 @@ void audio_set_speed(float speed)
     if (speed < 0.5f) speed = 0.5f;
     if (speed > 2.0f) speed = 2.0f;
     s_speed = speed;
-    /* Changer la frequence NDSP = changer la vitesse */
-    float new_rate = (float)TARGET_RATE * speed;
+
+    /* V0.97 : combiner avec le pitch pro si actif (New 3DS) */
+    extern bool g_is_new3ds;
+    float pitch_ratio = 1.0f;
+    if (g_is_new3ds && g_settings.pitch_semitones != 0) {
+        pitch_ratio = powf(2.f, (float)g_settings.pitch_semitones / 12.f);
+    }
+
+    /* NDSP rate = TARGET × speed_fun × pitch_pro
+       Le WSOLA de audio_thread compensera pour maintenir la vitesse voulue */
+    float new_rate = (float)TARGET_RATE * speed * pitch_ratio;
     ndspChnSetRate(NDSP_CHANNEL, new_rate);
 }
 AudioState audio_get_state(void)   { return s_state; }
 bool  audio_is_finished(void)      { return s_state == AUDIO_STOPPED && s_meta.duration_sec > 0; }
 const AudioMetadata *audio_get_metadata(void) { return &s_meta; }
 
-void audio_get_visualizer(float out[EQ_BANDS])
-{
-    for (int i = 0; i < EQ_BANDS; i++) out[i] = s_viz[i];
-}
+
 
 void audio_get_visualizer_fft(float out[EQ_BANDS])
 {
+    s_fft_needed = true; /* Signale au thread audio que FFT est necessaire */
     for (int i = 0; i < EQ_BANDS; i++) out[i] = s_viz_fft[i];
 }
 
-void  audio_eq_set_gain(int b, float db) { if (b >= 0 && b < EQ_BANDS) s_eq_gains[b] = db; }
+void audio_get_visualizer(float out[EQ_BANDS])
+{
+    s_fft_needed = false; /* Pas besoin de FFT si viz classique */
+    for (int i = 0; i < EQ_BANDS; i++) out[i] = s_viz[i];
+}
+
+void  audio_eq_set_gain(int b, float db) {
+    if (b >= 0 && b < EQ_BANDS) s_eq_gains[b] = db;
+    /* Mettre a jour le cache eq_active */
+    bool active = false;
+    for (int i = 0; i < EQ_BANDS; i++)
+        if (s_eq_gains[i] != 0.f) { active = true; break; }
+    s_eq_active_cache = active;
+}
 float audio_eq_get_gain(int b)           { return (b >= 0 && b < EQ_BANDS) ? s_eq_gains[b] : 0.f; }
-void  audio_eq_apply_preset(const EQPreset *p) { if (p) for (int i=0;i<EQ_BANDS;i++) s_eq_gains[i]=p->gain[i]; }
+void  audio_eq_apply_preset(const EQPreset *p) {
+    if (p) for (int i=0;i<EQ_BANDS;i++) s_eq_gains[i]=p->gain[i];
+    /* Mettre a jour le cache */
+    bool active = false;
+    for (int i = 0; i < EQ_BANDS; i++)
+        if (s_eq_gains[i] != 0.f) { active = true; break; }
+    s_eq_active_cache = active;
+}
 
 EQPreset eq_preset_flat        = {{0,0,0,0,0,0,0,0},       "Flat"};
 EQPreset eq_preset_bass_boost  = {{6,5,4,1,0,0,0,0},       "Bass Boost"};
@@ -904,3 +978,268 @@ EQPreset eq_preset_vocal       = {{-2,-1,2,4,4,3,1,0},     "Vocal"};
 EQPreset eq_preset_rock        = {{4,3,0,-1,0,2,4,5},      "Rock"};
 EQPreset eq_preset_classical   = {{3,2,0,0,0,0,2,3},       "Classical"};
 EQPreset eq_preset_electronic  = {{5,4,0,-1,1,3,4,5},      "Electronic"};
+
+/* V0.96 : desactiver temporairement le calcul viz (mode eco) */
+void audio_set_viz_active(bool active)
+{
+    s_viz_forced_off = !active;
+}
+
+/* V0.97 : Copie les samples oscilloscope vers out[] */
+int audio_get_oscillo(float out[256])
+{
+    int n = s_oscillo_idx;
+    if (n > 256) n = 256;
+    for (int i = 0; i < n; i++) out[i] = s_oscillo_buf[i];
+    return n;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   V0.97 : CROSSFADE - precache PCM + lecture canal separe
+   ═══════════════════════════════════════════════════════════════ */
+
+static void xfade_lock_init(void)
+{
+    if (!s_xfade_lock_init) {
+        LightLock_Init(&s_xfade_lock);
+        s_xfade_lock_init = true;
+    }
+}
+
+static void xfade_precache_worker(void *arg)
+{
+    (void)arg;
+    s_xfade_precache_running = true;
+    /* Appel bloquant du precache (thread separe = pas de freeze main) */
+    audio_xfade_precache(s_xfade_precache_pending, s_xfade_precache_pending_dur);
+    s_xfade_precache_running = false;
+}
+
+/* V0.97 : Precache asynchrone - lance dans un thread priorite basse */
+void audio_xfade_precache_async(const char *path, int duration_sec)
+{
+    if (!path || s_xfade_precache_running) return;
+    strncpy(s_xfade_precache_pending, path, 511);
+    s_xfade_precache_pending[511] = 0;
+    s_xfade_precache_pending_dur = duration_sec;
+
+    /* Cleanup ancien thread si necessaire */
+    if (s_xfade_precache_thread) {
+        threadJoin(s_xfade_precache_thread, U64_MAX);
+        threadFree(s_xfade_precache_thread);
+        s_xfade_precache_thread = NULL;
+    }
+
+    /* Nouveau thread priorite basse (n interfere pas avec audio) */
+    s_xfade_precache_thread = threadCreate(
+        xfade_precache_worker, NULL, 64*1024, 0x3F, -1, true);
+}
+
+bool audio_xfade_is_precached(const char *path)
+{
+    if (!path || !s_xfade_buf || s_xfade_total_samples == 0) return false;
+    return strcmp(s_xfade_path, path) == 0;
+}
+
+bool audio_xfade_is_active(void)
+{
+    return s_xfade_active;
+}
+
+bool audio_xfade_precache(const char *path, int duration_sec)
+{
+    xfade_lock_init();
+    if (!path || !path[0]) return false;
+    if (duration_sec < 2) duration_sec = 2;
+    if (duration_sec > XFADE_MAX_SEC) duration_sec = XFADE_MAX_SEC;
+
+    /* Deja precache pour ce path ? */
+    if (audio_xfade_is_precached(path)) return true;
+
+    LightLock_Lock(&s_xfade_lock);
+
+    /* Nettoyer l ancien buffer */
+    if (s_xfade_buf) {
+        linearFree(s_xfade_buf);
+        s_xfade_buf = NULL;
+    }
+    s_xfade_total_samples = 0;
+    s_xfade_path[0] = 0;
+
+    /* Allouer nouveau buffer (max duration_sec * SAMPLE_RATE stereo) */
+    int max_samples = duration_sec * SAMPLE_RATE;
+    size_t buf_size = max_samples * CHANNELS * sizeof(s16);
+    s_xfade_buf = (s16*)linearAlloc(buf_size);
+    if (!s_xfade_buf) {
+        LightLock_Unlock(&s_xfade_lock);
+        return false;
+    }
+    memset(s_xfade_buf, 0, buf_size);
+
+    LightLock_Unlock(&s_xfade_lock);
+
+    /* Ouvrir le fichier avec un decodeur temporaire */
+    AudioFormat fmt = detect_fmt(path);
+    int decoded_pairs = 0;
+
+    /* On utilise des variables locales temporaires pour ne pas
+       toucher a l etat du decodeur principal */
+    switch (fmt) {
+        case FMT_OGG: {
+            int err = 0;
+            stb_vorbis *v = stb_vorbis_open_filename(path, &err, NULL);
+            if (!v) break;
+            stb_vorbis_info info = stb_vorbis_get_info(v);
+            /* Decoder directement en s16 */
+            while (decoded_pairs < max_samples) {
+                int remaining = max_samples - decoded_pairs;
+                s16 *out = s_xfade_buf + decoded_pairs * CHANNELS;
+                int got = stb_vorbis_get_samples_short_interleaved(
+                    v, 2, out, remaining * 2);
+                if (got <= 0) break;
+                decoded_pairs += got;
+                (void)info;
+            }
+            stb_vorbis_close(v);
+            break;
+        }
+        case FMT_WAV: {
+            drwav w;
+            if (!drwav_init_file(&w, path, NULL)) break;
+            drwav_uint64 n = drwav_read_pcm_frames_s16(
+                &w, max_samples, s_xfade_buf);
+            decoded_pairs = (int)n;
+            drwav_uninit(&w);
+            break;
+        }
+        case FMT_FLAC: {
+            drflac *fl = drflac_open_file(path, NULL);
+            if (!fl) break;
+            drflac_uint64 n = drflac_read_pcm_frames_s16(
+                fl, max_samples, s_xfade_buf);
+            decoded_pairs = (int)n;
+            drflac_close(fl);
+            break;
+        }
+        case FMT_MP3: {
+            int err = 0;
+            mpg123_handle *mh = mpg123_new(NULL, &err);
+            if (!mh) break;
+            mpg123_param(mh, MPG123_FORCE_RATE, SAMPLE_RATE, 0);
+            mpg123_param(mh, MPG123_ADD_FLAGS, MPG123_FORCE_STEREO, 0);
+            if (mpg123_open(mh, path) == MPG123_OK) {
+                long rate; int ch, enc;
+                mpg123_getformat(mh, &rate, &ch, &enc);
+                mpg123_format_none(mh);
+                mpg123_format(mh, rate, 2, MPG123_ENC_SIGNED_16);
+                size_t done = 0;
+                size_t max_bytes = max_samples * CHANNELS * sizeof(s16);
+                mpg123_read(mh, (unsigned char*)s_xfade_buf, max_bytes, &done);
+                decoded_pairs = (int)(done / (CHANNELS * sizeof(s16)));
+                mpg123_close(mh);
+            }
+            mpg123_delete(mh);
+            break;
+        }
+        case FMT_OPUS: {
+            int err = 0;
+            OggOpusFile *op = op_open_file(path, &err);
+            if (!op) break;
+            /* op_read_stereo lit en s16 stereo entrelace */
+            int total = 0;
+            while (total < max_samples) {
+                int n = op_read_stereo(op,
+                    s_xfade_buf + total * CHANNELS,
+                    (max_samples - total) * 2);
+                if (n <= 0) break;
+                total += n;
+            }
+            decoded_pairs = total;
+            op_free(op);
+            break;
+        }
+        default:
+            break;
+    }
+
+    LightLock_Lock(&s_xfade_lock);
+    s_xfade_total_samples = decoded_pairs;
+    if (decoded_pairs > 0) {
+        strncpy(s_xfade_path, path, 511);
+        s_xfade_path[511] = 0;
+    }
+    LightLock_Unlock(&s_xfade_lock);
+
+    return decoded_pairs > 0;
+}
+
+void audio_xfade_start(void)
+{
+    xfade_lock_init();
+    LightLock_Lock(&s_xfade_lock);
+    if (!s_xfade_buf || s_xfade_total_samples == 0) {
+        LightLock_Unlock(&s_xfade_lock);
+        return;
+    }
+
+    /* Config canal 1 */
+    ndspChnReset(XFADE_CHANNEL);
+    ndspChnSetInterp(XFADE_CHANNEL, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(XFADE_CHANNEL, (float)SAMPLE_RATE);
+    ndspChnSetFormat(XFADE_CHANNEL, NDSP_FORMAT_STEREO_PCM16);
+
+    /* Mix initial : 100% volume canal 1 (sera modifie par audio_xfade_set_mix) */
+    float mix[12] = {0};
+    mix[0] = mix[1] = 0.f;
+    ndspChnSetMix(XFADE_CHANNEL, mix);
+
+    /* Envoyer le buffer entier au NDSP */
+    memset(&s_xfade_wbuf, 0, sizeof(s_xfade_wbuf));
+    s_xfade_wbuf.data_vaddr = s_xfade_buf;
+    s_xfade_wbuf.nsamples = s_xfade_total_samples;
+    s_xfade_wbuf.looping = false;
+
+    DSP_FlushDataCache(s_xfade_buf,
+        s_xfade_total_samples * CHANNELS * sizeof(s16));
+    ndspChnWaveBufAdd(XFADE_CHANNEL, &s_xfade_wbuf);
+
+    s_xfade_active = true;
+    s_xfade_play_pos = 0;
+    LightLock_Unlock(&s_xfade_lock);
+}
+
+void audio_xfade_set_mix(float vol_current, float vol_next)
+{
+    /* Canal 0 (piste actuelle) */
+    float mix0[12] = {0};
+    mix0[0] = mix0[1] = vol_current * s_volume;
+    ndspChnSetMix(NDSP_CHANNEL, mix0);
+
+    /* Canal 1 (piste suivante) */
+    if (s_xfade_active) {
+        float mix1[12] = {0};
+        mix1[0] = mix1[1] = vol_next * s_volume;
+        ndspChnSetMix(XFADE_CHANNEL, mix1);
+    }
+}
+
+void audio_xfade_stop(void)
+{
+    xfade_lock_init();
+    LightLock_Lock(&s_xfade_lock);
+    if (s_xfade_active) {
+        ndspChnWaveBufClear(XFADE_CHANNEL);
+        ndspChnReset(XFADE_CHANNEL);
+        s_xfade_active = false;
+    }
+    if (s_xfade_buf) {
+        linearFree(s_xfade_buf);
+        s_xfade_buf = NULL;
+    }
+    s_xfade_total_samples = 0;
+    s_xfade_path[0] = 0;
+    s_xfade_play_pos = 0;
+    LightLock_Unlock(&s_xfade_lock);
+    /* Restaurer le mix normal du canal 0 */
+    set_mix(s_volume);
+}

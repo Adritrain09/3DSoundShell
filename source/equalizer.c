@@ -4,6 +4,7 @@
 #include "main.h"
 #include "settings.h"
 #include "theme.h"
+#include "i18n.h"
 #include <citro2d.h>
 #include <string.h>
 #include <stdio.h>
@@ -111,7 +112,7 @@ void eq_draw_top(int selected_band)
     }
 
     /* Label visualiseur */
-    draw_text(start_x-5, viz_y_base + 2, 0.36f, th->text_disabled, "NIVEAU");
+    draw_text(start_x-5, viz_y_base + 2, 0.36f, th->text_disabled, T("NIVEAU"));
 
     /* ── Barres EQ ── */
     for(int i=0;i<EQ_SCREEN_BANDS;i++) {
@@ -177,7 +178,7 @@ void eq_draw_bottom(int selected_band)
     Theme *th=current_theme;
     draw_rect(0,0,BOT_WIDTH,BOT_HEIGHT,th->bg_primary);
     draw_rect(0,0,BOT_WIDTH,26,th->bg_header);
-    draw_text(6,5,0.52f,th->text_primary,"Egaliseur");
+    draw_text(6,5,0.52f,th->text_primary,T("Egaliseur"));
 
     /* Info bande selectionnee */
     draw_rect(0,28,BOT_WIDTH,30,th->bg_secondary);
@@ -207,10 +208,10 @@ void eq_draw_bottom(int selected_band)
 
     /* Controles */
     draw_text(8, 70,0.44f,th->text_secondary, "< >  Changer bande");
-    draw_text(8, 86,0.44f,th->text_secondary, "v ^  Gain -1 / +1 dB");
-    draw_text(8,102,0.44f,th->text_secondary, "A    Preset suivant");
-    draw_text(8,118,0.44f,th->text_secondary, "X    Tout a zero");
-    draw_text(8,134,0.44f,th->text_secondary, "B    Retour");
+    draw_text(8, 86,0.44f,th->text_secondary, T("v ^  Gain -1 / +1 dB"));
+    draw_text(8,102,0.44f,th->text_secondary, T("A    Preset suivant"));
+    draw_text(8,118,0.44f,th->text_secondary, T("X    Tout a zero"));
+    draw_text(8,134,0.44f,th->text_secondary, T("B    Retour"));
 
     /* Notif MAJ temporaire */
     draw_update_notif_timed();

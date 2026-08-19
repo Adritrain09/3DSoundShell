@@ -33,8 +33,6 @@
 #include "settings.h"
 #include "theme.h"
 #include "audio.h"
-#include "sleep_timer.h"
-#include "i18n.h"
 #include "stb_image.h"
 #include <string.h>
 #include <math.h>
@@ -391,377 +389,6 @@ static void draw_viz_eq(const PlayerUI *ui, float x, float y,
 }
 
 // ============================================================
-// VISUALISEUR MODE "OSCILLOSCOPE" — style vrai oscillo scientifique
-// V0.97 : ligne verte fine sur grille avec zero-crossing trigger
-// ============================================================
-static void draw_viz_oscillo(const PlayerUI *ui, float x, float y,
-                              float w, float h)
-{
-    Theme *th = current_theme;
-    (void)ui;
-    (void)th;
-
-    /* V0.97 v2 : version SAFE avec bornes strictes anti-freeze */
-    float samples[256];
-    int n = audio_get_oscillo(samples);
-    if (n < 2 || n > 256) return;
-
-    /* Grille en fond */
-    u32 grid_col = RGBA8(40, 40, 60, 100);
-    for (int i = 0; i <= 4; i++) {
-        float ly = y + (h * i / 4.f);
-        C2D_DrawRectSolid(x, ly, 0, w, 1, grid_col);
-    }
-    for (int i = 0; i <= 8; i++) {
-        float lx = x + (w * i / 8.f);
-        C2D_DrawRectSolid(lx, y, 0, 1, h, grid_col);
-    }
-
-    /* Ligne centrale */
-    float cy = y + h / 2.f;
-    C2D_DrawRectSolid(x, cy, 0, w, 1, RGBA8(80, 80, 100, 180));
-
-    /* Zero-crossing trigger safe */
-    int start_idx = 0;
-    for (int i = 1; i < n - 1; i++) {
-        if (samples[i-1] < 0.f && samples[i] >= 0.f) {
-            start_idx = i;
-            break;
-        }
-    }
-
-    int display_n = n - start_idx;
-    if (display_n < 32) {
-        display_n = n;
-        start_idx = 0;
-    }
-    if (display_n > 256) display_n = 256;
-    if (start_idx < 0 || start_idx >= n) start_idx = 0;
-
-    /* Couleur VIVE et VISIBLE : blanc/cyan flashy */
-    u32 line_col = RGBA8(0, 255, 200, 255); /* cyan neon */
-
-    /* Dessin trace : lignes reliees SAFE avec limite anti-freeze */
-    float prev_px = -1.f, prev_py = -1.f;
-
-    for (int i = 0; i < display_n; i++) {
-        int si = start_idx + i;
-        if (si >= n) break;
-
-        float sample = samples[si];
-        if (sample > 1.f) sample = 1.f;
-        if (sample < -1.f) sample = -1.f;
-
-        float px = x + (float)i * w / (float)display_n;
-        float py = cy - sample * (h * 0.45f);
-
-        if (py < y) py = y;
-        if (py > y + h - 2) py = y + h - 2;
-        if (px < x) px = x;
-        if (px > x + w - 2) px = x + w - 2;
-
-        /* Relier au point precedent avec une ligne SAFE */
-        if (prev_px >= 0.f) {
-            float dx = px - prev_px;
-            float dy = py - prev_py;
-            /* LIMITE ABSOLUE : max 20 sous-points par segment (anti-freeze) */
-            int steps = (int)(fabsf(dy) / 2.f) + 1;
-            if (steps > 20) steps = 20;
-            if (steps < 1) steps = 1;
-
-            for (int s = 0; s <= steps; s++) {
-                float t = (float)s / (float)steps;
-                float lx = prev_px + dx * t;
-                float ly = prev_py + dy * t;
-                C2D_DrawRectSolid(lx, ly, 0, 2, 2, line_col);
-            }
-        } else {
-            C2D_DrawRectSolid(px, py, 0, 2, 2, line_col);
-        }
-
-        prev_px = px;
-        prev_py = py;
-    }
-}
-
-// ============================================================
-// VISUALISEUR MODE "WAVES" — vagues (V4 lookup table sin, ultra rapide)
-// ============================================================
-#define WAVES_LUT_SIZE 128
-static float s_waves_sin_lut[WAVES_LUT_SIZE];
-static bool  s_waves_lut_init = false;
-
-static void draw_viz_waves(const PlayerUI *ui, float x, float y,
-                            float w, float h)
-{
-    Theme *th = current_theme;
-
-    /* Init lookup table sin (calcule 1 seule fois) */
-    if (!s_waves_lut_init) {
-        for (int i = 0; i < WAVES_LUT_SIZE; i++)
-            s_waves_sin_lut[i] = sinf((float)i * 2.f * M_PI / WAVES_LUT_SIZE);
-        s_waves_lut_init = true;
-    }
-
-    /* V0.97 : Fond transparent avec trainee (comme Pulse) */
-    draw_rect(x, y, w, h, RGBA8(0, 0, 15, 60));
-
-    float cy = y + h / 2.f;
-
-    /* Phase globale - vitesse variable selon volume */
-    static int phase = 0;
-    extern int g_3d_eye;
-    if (g_3d_eye == 0) {
-        /* Volume global moyen */
-        float vol_g = 0.f;
-        for (int b = 0; b < EQ_BANDS; b++) vol_g += ui->viz_smooth[b];
-        vol_g /= EQ_BANDS;
-        /* Vitesse : 2 (calme) a 6 (fort) */
-        int step = 2 + (int)(vol_g * 4.f);
-        phase = (phase + step) % WAVES_LUT_SIZE;
-    }
-
-    /* 4 vagues seulement */
-    for (int layer = 0; layer < 4; layer++) {
-        float energy = (ui->viz_smooth[layer*2] + ui->viz_smooth[layer*2+1]) * 0.5f;
-        /* V0.97 : amplitude plus reactive (0.35 -> 0.6 + boost minimum) */
-        float amp = h * 0.6f * energy;
-        if (amp < 3.f) continue;
-
-        int freq_step = 1 + layer * 2; /* pas dans la LUT */
-
-        u32 col = th->visualizer_bars[layer * 2];
-        u8 r = (col >> 0)  & 0xff;
-        u8 g = (col >> 8)  & 0xff;
-        u8 b = (col >> 16) & 0xff;
-        u8 a = (u8)(100 + energy * 155);
-
-        /* Draw tous les 6 px (encore moins) + LUT au lieu de sinf */
-        int lut_pos = phase;
-        for (int i = 0; i < (int)w; i += 6) {
-            float wy = cy + s_waves_sin_lut[lut_pos % WAVES_LUT_SIZE] * amp;
-            if (wy < y) wy = y;
-            if (wy > y + h - 2) wy = y + h - 2;
-            draw_rect(x + i, wy, 6, 3, RGBA8(r, g, b, a));
-            lut_pos += freq_step;
-        }
-    }
-}
-
-// ============================================================
-// VISUALISEUR MODE "TUNNEL" — V5 utilise la largeur (plus grande)
-// ============================================================
-static void draw_viz_tunnel(const PlayerUI *ui, float x, float y,
-                             float w, float h)
-{
-    Theme *th = current_theme;
-
-    /* V0.97 : Fond transparent avec trainee (comme Pulse) */
-    draw_rect(x, y, w, h, RGBA8(0, 0, 15, 60));
-
-    float cx = x + w/2.f;
-    float cy = y + h/2.f;
-
-    /* Rayon max : utilise la LARGEUR (plus grande) mais clamp Y au bord */
-    float max_r = w / 2.f - 2;
-
-    /* Volume moyen */
-    float vol = 0.f;
-    for (int i = 0; i < EQ_BANDS; i++) vol += ui->viz_smooth[i];
-    vol /= EQ_BANDS;
-
-    static float zoom = 0.f;
-    extern int g_3d_eye;
-    if (g_3d_eye == 0) {
-        zoom += 0.03f + vol * 0.2f;
-        if (zoom > 1.f) zoom -= 1.f;
-    }
-
-    /* 10 anneaux (plus rapproches = effet tunnel plus prononce) */
-    for (int ring = 0; ring < 10; ring++) {
-        float t = ((float)ring / 10.f + zoom);
-        if (t > 1.f) t -= 1.f;
-
-        float r = t * max_r;
-        if (r < 8.f) continue;
-
-        int band = ring % EQ_BANDS;
-        float band_energy = ui->viz_smooth[band];
-
-        u32 col = th->visualizer_bars[band];
-        u8 rc = (col >> 0)  & 0xff;
-        u8 gc = (col >> 8)  & 0xff;
-        u8 bc = (col >> 16) & 0xff;
-
-        float fade = 1.f - fabsf(t - 0.5f) * 1.5f;
-        if (fade < 0.f) fade = 0.f;
-        u8 a = (u8)(255 * fade * (0.5f + band_energy));
-
-        /* Ratio pour aplatir en Y (evite depassement vertical) */
-        float y_scale = h / w;
-
-        int segs = (int)(r * 0.4f);
-        if (segs < 20) segs = 20;
-        if (segs > 60) segs = 60;
-
-        float size = 3.f + (1.f - t) * 4.f + band_energy * 3.f;
-
-        for (int s = 0; s < segs; s++) {
-            float ang = (float)s * 2.f * M_PI / segs;
-            float px = cx + cosf(ang) * r;
-            float py = cy + sinf(ang) * r * y_scale; /* aplati verticalement */
-
-            if (px < x || px > x + w - size
-                || py < y || py > y + h - size) continue;
-
-            draw_rect(px - size/2, py - size/2, size, size,
-                      RGBA8(rc, gc, bc, a));
-        }
-    }
-
-    /* Point central */
-    float ch_sz = 4.f + vol * 8.f;
-    draw_rect(cx - ch_sz/2, cy - ch_sz/2, ch_sz, ch_sz,
-              RGBA8(255, 255, 255, 255));
-}
-
-// ============================================================
-// VISUALISEUR MODE "PULSE" — V5 detection beat sur samples bruts
-// (utilise le buffer oscillo qui est mis a jour a chaque frame audio)
-// ============================================================
-#define PULSE_PARTICLES 60
-static struct {
-    float x, y, vx, vy, life, size;
-    u8 r, g, b;
-} s_pulse_p[PULSE_PARTICLES];
-static bool  s_pulse_init = false;
-
-/* Detection beat sur RMS des samples bruts (60Hz -> vraie detection) */
-static float s_pulse_rms_history[32] = {0};  /* 32 dernieres frames */
-static int   s_pulse_rms_pos = 0;
-static int   s_pulse_cooldown = 0;
-
-static void draw_viz_pulse(const PlayerUI *ui, float x, float y,
-                            float w, float h)
-{
-    Theme *th = current_theme;
-
-    if (!s_pulse_init) {
-        for (int i = 0; i < PULSE_PARTICLES; i++) s_pulse_p[i].life = 0.f;
-        for (int i = 0; i < 32; i++) s_pulse_rms_history[i] = 0.f;
-        s_pulse_init = true;
-    }
-
-    /* V0.97 : Fond noir tres leger pour trainee (mais quasi transparent) */
-    draw_rect(x, y, w, h, RGBA8(0, 0, 15, 25));
-
-    float cx = x + w/2.f;
-    float cy = y + h/2.f;
-
-    /* ═══ VRAIE DETECTION BEAT sur samples bruts (60fps) ═══ */
-    float oscillo[256];
-    int n = audio_get_oscillo(oscillo);
-
-    /* Calculer RMS uniquement sur les basses (filtre passe-bas simplifie) */
-    float rms = 0.f;
-    if (n > 4) {
-        /* Moyenne mobile 4 samples = filtre passe-bas -> extrait les basses */
-        for (int i = 0; i < n - 4; i++) {
-            float low = (oscillo[i] + oscillo[i+1] + oscillo[i+2] + oscillo[i+3]) * 0.25f;
-            rms += low * low;
-        }
-        rms = sqrtf(rms / (n - 4));
-    }
-
-    /* Historique RMS pour detecter les pics */
-    s_pulse_rms_history[s_pulse_rms_pos] = rms;
-    s_pulse_rms_pos = (s_pulse_rms_pos + 1) % 32;
-
-    /* Moyenne sur derniers 32 frames (~0.5 sec) */
-    float rms_avg = 0.f;
-    for (int i = 0; i < 32; i++) rms_avg += s_pulse_rms_history[i];
-    rms_avg /= 32.f;
-
-    /* Beat = RMS actuel > 1.3 x moyenne */
-    bool is_beat = false;
-    if (s_pulse_cooldown > 0) s_pulse_cooldown--;
-    if (g_3d_eye == 0 && rms > rms_avg * 1.22f && rms > 0.035f && s_pulse_cooldown == 0) {
-        is_beat = true;
-        s_pulse_cooldown = 6; /* min 100ms entre beats */
-    }
-
-    /* SPAWN particules sur beat */
-    if (is_beat) {
-        int spawned = 0;
-        for (int i = 0; i < PULSE_PARTICLES && spawned < 20; i++) {
-            if (s_pulse_p[i].life <= 0.f) {
-                float ang = (float)(rand() % 3600) * M_PI / 1800.f;
-                float speed = 3.f + (float)(rand() % 50) / 10.f;
-                s_pulse_p[i].x = cx;
-                s_pulse_p[i].y = cy;
-                s_pulse_p[i].vx = cosf(ang) * speed;
-                s_pulse_p[i].vy = sinf(ang) * speed;
-                s_pulse_p[i].life = 1.f;
-                s_pulse_p[i].size = 5.f + (float)(rand() % 40) / 10.f;
-                if (rms > rms_avg * 1.65f) {
-                    /* Gros beat = rouge/orange */
-                    s_pulse_p[i].r = 255;
-                    s_pulse_p[i].g = 100 + rand() % 155;
-                    s_pulse_p[i].b = 30 + rand() % 50;
-                } else {
-                    u32 col = th->visualizer_bars[rand() % EQ_BANDS];
-                    s_pulse_p[i].r = (col >> 0)  & 0xff;
-                    s_pulse_p[i].g = (col >> 8)  & 0xff;
-                    s_pulse_p[i].b = (col >> 16) & 0xff;
-                }
-                spawned++;
-            }
-        }
-    }
-
-    /* Update particules SEULEMENT sur oeil gauche pour 3D */
-    extern int g_3d_eye;
-    bool do_update = (g_3d_eye == 0);
-    for (int i = 0; i < PULSE_PARTICLES; i++) {
-        if (s_pulse_p[i].life <= 0.f) continue;
-        if (do_update) {
-            s_pulse_p[i].x += s_pulse_p[i].vx;
-            s_pulse_p[i].y += s_pulse_p[i].vy;
-            s_pulse_p[i].vx *= 0.96f;
-            s_pulse_p[i].vy *= 0.96f;
-            s_pulse_p[i].life -= 0.02f;
-        }
-
-        if (s_pulse_p[i].x < x || s_pulse_p[i].x > x + w
-            || s_pulse_p[i].y < y || s_pulse_p[i].y > y + h
-            || s_pulse_p[i].life <= 0.f) {
-            s_pulse_p[i].life = 0;
-            continue;
-        }
-
-        float sz = s_pulse_p[i].size * s_pulse_p[i].life;
-        u8 a = (u8)(s_pulse_p[i].life * 255);
-        draw_rect(s_pulse_p[i].x - sz/2, s_pulse_p[i].y - sz/2, sz, sz,
-                  RGBA8(s_pulse_p[i].r, s_pulse_p[i].g, s_pulse_p[i].b, a));
-    }
-
-    /* Coeur central toujours visible - pulse avec RMS */
-    float heart_sz = 12.f + rms * 60.f;
-    if (heart_sz > 50.f) heart_sz = 50.f;
-    u32 heart_col = is_beat ? RGBA8(255,255,255,255)
-                            : (rms > rms_avg * 1.1f ? th->accent2 : th->accent);
-    draw_rect(cx - heart_sz/2, cy - heart_sz/2, heart_sz, heart_sz, heart_col);
-
-    /* Halo permanent autour */
-    float halo_sz = heart_sz + 10.f;
-    u8 halo_a = (u8)(60 + rms * 200);
-    if (halo_a > 200) halo_a = 200;
-    draw_rect(cx - halo_sz/2, cy - halo_sz/2, halo_sz, halo_sz,
-              RGBA8((heart_col>>0)&0xff, (heart_col>>8)&0xff,
-                    (heart_col>>16)&0xff, halo_a));
-}
-
-// ============================================================
 // VISUALISEUR MODE "BARRES" — 8 barres simples
 // ============================================================
 static void draw_viz_bars(const PlayerUI *ui, float x, float y,
@@ -986,17 +613,12 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
 
     /* Notif MAJ bas gauche - visible 5sec au demarrage */
     if (g_update_notif_timer > 0) {
-        if (g_server_unreachable) {
-            draw_text(8, 225, 0.50f, RGBA8(255,150,50,255), T("Serveur inaccessible"));
-        } else if (g_version_ahead) {
-            /* V0.96 : version installee > enregistree (build dev) */
-            draw_text(8, 225, 0.50f, RGBA8(100,200,255,255), T("Version en avance"));
-        } else if (g_update_available) {
+        if (g_update_available) {
             char maj_notif[48];
-            snprintf(maj_notif, 48, T("Mise a jour V%s disponible"), g_latest_version);
+            snprintf(maj_notif, 48, "Mise a jour V%s disponible", g_latest_version);
             draw_text(8, 225, 0.50f, th->accent2, maj_notif);
         } else {
-            draw_text(8, 225, 0.50f, th->text_disabled, T("Version a jour."));
+            draw_text(8, 225, 0.50f, th->text_disabled, "Version a jour.");
         }
     }
 
@@ -1005,17 +627,17 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
 
     // Badge PLAY/PAUSE/STOP
     AudioState st = audio_get_state();
-    const char *badge = (st==AUDIO_PLAYING) ? T("PLAY >") :
-                        (st==AUDIO_PAUSED)  ? T("PAUSE ||") : T("STOP !");
+    const char *badge = (st==AUDIO_PLAYING) ? "PLAY >" :
+                        (st==AUDIO_PAUSED)  ? "PAUSE ||" : "STOP !";
     draw_text(TOP_WIDTH - 65 + hd, 5, 0.48f,
         st==AUDIO_PLAYING ? th->accent : th->text_disabled, badge);
 
     if (pl->shuffle)
-        draw_text(TOP_WIDTH - 130 + hd, 5, 0.45f, th->accent2, "[A]");
+        draw_text(TOP_WIDTH - 130 + hd, 5, 0.45f, th->accent2, "[?]");
     if (pl->repeat == REPEAT_ONE)
-        draw_text(TOP_WIDTH - 100 + hd, 5, 0.45f, th->accent, T("rep.1"));
+        draw_text(TOP_WIDTH - 100 + hd, 5, 0.45f, th->accent, "rep.1");
     else if (pl->repeat == REPEAT_ALL)
-        draw_text(TOP_WIDTH - 100 + hd, 5, 0.45f, th->accent, T("rep.A"));
+        draw_text(TOP_WIDTH - 100 + hd, 5, 0.45f, th->accent, "rep.A");
 
     // ════════════════════════════════════════════════════════
     // POCHETTE  d3(1.2f) ← changer pour plus/moins d'effet
@@ -1083,20 +705,6 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
     draw_text(info_x, info_y0 + 22, 0.46f, th->text_secondary, meta->artist);
     draw_text(info_x, info_y0 + 38, 0.44f, th->text_disabled,  meta->album);
 
-    /* V0.97 : Affichage du sleep timer a droite */
-    if (sleep_timer_is_active()) {
-        int rem = sleep_timer_get_remaining_sec();
-        char tstr[24];
-        if (rem >= 3600)
-            snprintf(tstr, 24, "SLEEP %d:%02d:%02d",
-                rem / 3600, (rem % 3600) / 60, rem % 60);
-        else
-            snprintf(tstr, 24, "SLEEP %d:%02d", rem / 60, rem % 60);
-
-        u32 tcol = sleep_timer_is_paused() ? th->text_disabled : th->accent2;
-        draw_text(info_x + 195, info_y0 + 22, 0.42f, tcol, tstr);
-    }
-
     if (meta->year > 0) {
         char yr[16]; snprintf(yr, 16, "(%d)", meta->year);
         draw_text(info_x + 180, info_y0 + 38, 0.44f, th->text_disabled, yr);
@@ -1106,10 +714,10 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
 
     char info_line[48] = "";
     if (meta->format[0] && pl->count > 0 && pl->current >= 0)
-        snprintf(info_line, 48, "%s  %s %d/%d",
-                 meta->format, T("Piste"), pl->current+1, pl->count);
+        snprintf(info_line, 48, "%s  Piste %d/%d",
+                 meta->format, pl->current+1, pl->count);
     else if (pl->count > 0 && pl->current >= 0)
-        snprintf(info_line, 48, "%s %d/%d", T("Piste"), pl->current+1, pl->count);
+        snprintf(info_line, 48, "Piste %d/%d", pl->current+1, pl->count);
     else if (meta->format[0])
         snprintf(info_line, 48, "%s", meta->format);
     draw_text(info_x, info_y0 + 70, 0.40f, th->text_disabled, info_line);
@@ -1146,7 +754,7 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
     // ── Volume  d3(0.0f) = plan neutre ───────────────────────
     float vol   = audio_get_volume();
     float vol_d = d3(0.f);
-    draw_text(pb_x + vol_d,       pb_y + 22, 0.40f, th->text_disabled, T("VOL"));
+    draw_text(pb_x + vol_d,       pb_y + 22, 0.40f, th->text_disabled, "VOL");
     draw_rect(pb_x+26 + vol_d,    pb_y + 24, 120,     5, th->progress_bg);
     draw_rect(pb_x+26 + vol_d,    pb_y + 24, 120*vol, 5, th->accent2);
     char vol_str[8];
@@ -1166,14 +774,6 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
     float vw  = 384;
     float vh  = 60;
 
-    if (!g_settings.viz_enabled) {
-        /* V0.96 : viz desactive, on affiche juste "VIZ OFF" */
-        draw_rect(vx - 2, vy - 2, vw + 4, vh + 4, th->bg_secondary);
-        draw_text(vx + vw/2.f - 30, vy + vh/2.f - 6, 0.45f,
-                  th->text_disabled, "-- Viz OFF --");
-        return;
-    }
-
     draw_rect(vx - 2, vy - 2, vw + 4, vh + 4, th->bg_secondary);
 
     switch (ui->viz_style) {
@@ -1189,26 +789,14 @@ void player_ui_draw_top(const PlayerUI *ui, const AudioMetadata *meta,
         case VIZ_FIRE:
             draw_viz_fire(ui, vx, vy, vw, vh);
             break;
-                case VIZ_WAVES:
-            draw_viz_waves(ui, vx, vy, vw, vh);
-            break;
-        case VIZ_TUNNEL:
-            draw_viz_tunnel(ui, vx, vy, vw, vh);
-            break;
-        case VIZ_PULSE:
-            draw_viz_pulse(ui, vx, vy, vw, vh);
-            break;
         case VIZ_EQ:
             draw_viz_eq(ui, vx, vy, vw, vh);
-            break;
-        case VIZ_OSCILLO:
-            draw_viz_oscillo(ui, vx, vy, vw, vh);
             break;
         default:
             break;
     }
 
-    const char *viz_names[] = {T("Barres"),T("Onde"),T("Cercle"),T("Feu"),T("Oscillo"),T("Waves"),T("Tunnel"),T("Pulse"),T("EQ")};
+    const char *viz_names[] = {"Barres","Onde","Cercle","Feu","EQ"};
     draw_text(vx + vw - 40, vy + vh + 4, 0.38f,
               th->text_disabled, viz_names[ui->viz_style]);
 }
@@ -1227,7 +815,7 @@ void player_ui_draw_bottom(PlayerUI *ui, const AudioMetadata *meta,
 
     draw_rect(0, 0, BOT_WIDTH, BOT_HEIGHT, th->bg_primary);
     draw_rect(0, 0, BOT_WIDTH, 26, th->bg_header);
-    draw_text(8, 5, 0.52f, th->text_accent, T("Controles"));
+    draw_text(8, 5, 0.52f, th->text_accent, "Controles");
 
     // Batterie
     u8 batt_pct = 0, charging = 0;
@@ -1243,14 +831,14 @@ void player_ui_draw_bottom(PlayerUI *ui, const AudioMetadata *meta,
         pct <= 20 ? th->accent2 : th->text_disabled, bstr);
 
     // Indication seek tactile (simple texte, pas de barre)
-    draw_text(90, 224, 0.42f, th->text_disabled, T("< appuiez ici pour avancer >"));
+    draw_text(90, 224, 0.42f, th->text_disabled, "< glisser ici pour avancer >");
 
     // Boutons principaux
     float by = 36;
     struct { const char *lbl; float x; u32 col; } btns[] = {
-        {"<- Prev",   14,  th->text_secondary},
-        {"L+R Pause", 110, th->accent},  /* L+R = touches, universel */
-        {"Next ->",   222, th->text_secondary},
+        {"<- Prec",   14,  th->text_secondary},
+        {"L+R Pause", 110, th->accent},
+        {"Suiv ->",   222, th->text_secondary},
     };
     for (int i = 0; i < 3; i++) {
         draw_rect(btns[i].x, by, 80, 20, th->bg_secondary);
@@ -1259,69 +847,33 @@ void player_ui_draw_bottom(PlayerUI *ui, const AudioMetadata *meta,
     draw_rect(0, by+24, BOT_WIDTH, 1, th->border);
     by += 32;
 
-    draw_text(10,  by, 0.44f, th->text_secondary, T("+- Volume"));
-    draw_text(110, by, 0.44f, th->text_secondary, T("ZL/ZR +-10s"));
+    draw_text(10,  by, 0.44f, th->text_secondary, "+- Volume");
+    draw_text(110, by, 0.44f, th->text_secondary, "ZL/ZR +-10s");
     draw_text(222, by, 0.44f,
         pl->shuffle ? th->accent : th->text_disabled,
-        pl->shuffle ? T("Aleat ON") : T("Aleat OFF"));
+        pl->shuffle ? "Aleat ON" : "Aleat OFF");
     by += 20;
 
-    const char *rep_str[] = {T("Repet: Non"),T("Repet: x1"),T("Repet: Tout")};
+    const char *rep_str[] = {"Repet: Non","Repet: x1","Repet: Tout"};
     draw_text(10, by, 0.44f,
         pl->repeat != REPEAT_NONE ? th->accent : th->text_disabled,
         rep_str[pl->repeat]);
-    const char *viz_n[] = {T("Barres"),T("Onde"),T("Cercle"),T("Feu"),T("Oscillo"),T("Waves"),T("Tunnel"),T("Pulse"),T("EQ Pro")};
+    const char *viz_n[] = {"Barres","Onde","Cercle","Feu","EQ Pro"};
     draw_text(180, by, 0.44f, th->text_secondary, viz_n[ui->viz_style]);
     draw_rect(0, by+18, BOT_WIDTH, 1, th->border);
     by += 24;
 
     const char *keys[] = {
-        T("A = Play/Pause"),    T("L+R = Play/Pause"),
-        T("X = Playlist"),      T("Y = Aleatoire"),
-        T("Select = Fichiers"), T("R = Changer Viz"),
-        T("B = Retour"),
+        "A = Play/Pause",    "L+R = Play/Pause",
+        "X = Playlist",      "Y = Aleatoire",
+        "Select = Fichiers", "R = Changer Viz",
+        "B = Retour",
     };
     for (int i = 0; i < 7; i++) {
         float kx = (i%2==0) ? 8 : 164;
         float ky  = by + (i/2)*16;
         draw_text(kx, ky, 0.38f, th->text_disabled, keys[i]);
     }
-
-    /* V0.97 : Bouton tactile play/pause timer (bas droite) - visible seulement si actif */
-    if (sleep_timer_is_active()) {
-        float bx = BOT_WIDTH - 90;
-        float by2 = BOT_HEIGHT - 60;
-        float bw = 82, bh = 32;
-
-        /* V0.97 : couleurs INVERSEES : actif = theme accent, pause = grise */
-        u32 bg_col;
-        if (sleep_timer_is_paused()) {
-            bg_col = RGBA8(80, 80, 90, 255); /* grise */
-        } else {
-            bg_col = th->accent; /* couleur theme (accent principal) */
-        }
-        draw_rect(bx, by2, bw, bh, bg_col);
-
-        /* Bordure */
-        draw_rect(bx, by2, bw, 1, th->border);
-        draw_rect(bx, by2+bh-1, bw, 1, th->border);
-        draw_rect(bx, by2, 1, bh, th->border);
-        draw_rect(bx+bw-1, by2, 1, bh, th->border);
-
-        /* Texte : blanc sur actif, gris clair sur pause */
-        const char *label = sleep_timer_is_paused() ? "SLEEP ||" : "SLEEP >";
-        u32 tcol = sleep_timer_is_paused()
-            ? RGBA8(180, 180, 190, 255)
-            : RGBA8(255, 255, 255, 255);
-        draw_text(bx + 6, by2 + 4, 0.45f, tcol, label);
-
-        /* Temps restant */
-        int rem = sleep_timer_get_remaining_sec();
-        char tstr[16];
-        snprintf(tstr, 16, "%d:%02d", rem/60, rem%60);
-        draw_text(bx + 6, by2 + 18, 0.38f, tcol, tstr);
-    }
-
     (void)meta;
 }
 

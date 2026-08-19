@@ -22,17 +22,12 @@
 #include "settings.h"
 #include "input.h"
 #include "favorites.h"
-#include "preview.h"
-#include "power_save.h"
-#include "wifi_manager.h"
-#include "sleep_timer.h"
 
 /* Variables globales 3D stéréoscopique */
 float g_3d_iod = 0.f;
 int   g_3d_eye = 0;
 int   g_update_notif_timer = 0;
 bool  g_is_new3ds = false; /* détecté une fois au démarrage */
-u8    s_startup_brightness = 5; /* V0.97 : luminosite au demarrage app */
 
 /* ── TextBuf global partagé (filebrowser, equalizer, etc.) ── */
 static u64   s_touch_arrow_held_time = 0;
@@ -106,7 +101,11 @@ static C3D_RenderTarget *g_top_right = NULL;
 static C3D_RenderTarget *g_bot = NULL;
 
 /* ── Debug log ────────────────────────────────────────────── */
-static void dbg(const char *msg) { (void)msg; }
+static void dbg(const char *msg)
+{
+    FILE *f = fopen("sdmc:/3DSoundShell/debug.log", "a");
+    if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+}
 
 /* ── Load and play ────────────────────────────────────────── */
 /* Reset timer auto-avance a chaque nouveau chargement */
@@ -160,11 +159,7 @@ static void play_current_track(void)
 {
     if (g_playlist.current < 0 ||
         g_playlist.current >= g_playlist.count) return;
-    /* V0.97 : ne pas forcer STATE_PLAYER, garder l ecran actuel */
-    AppState saved_state = g_state;
     load_and_play(g_playlist.items[g_playlist.current].path);
-    /* Si on etait ailleurs que dans le player, y rester */
-    if (saved_state != STATE_PLAYER) g_state = saved_state;
 }
 
 /* ── Touch seek ───────────────────────────────────────────── */
@@ -249,7 +244,6 @@ static void input_file_browser(void)
                     } else if (fe->is_audio) {
                         pl_clear(&g_playlist);
                         pl_add_dir(&g_playlist, g_browser.cwd);
-
                         for (int i = 0; i < g_playlist.count; i++) {
                             if (!strcmp(g_playlist.items[i].path,
                                         fe->full_path)) {
@@ -352,6 +346,7 @@ static void input_player(void)
     if ((kd & KEY_R) && (held & KEY_L)) { audio_toggle_pause(); return; }
 
     if (kd & KEY_LEFT) {
+        // Forcer prev même en REPEAT_ONE
         RepeatMode saved = g_playlist.repeat;
         if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
         int n = pl_prev(&g_playlist);
@@ -359,6 +354,7 @@ static void input_player(void)
         if (n >= 0) play_current_track();
     }
     if (kd & KEY_RIGHT) {
+        // Forcer next même en REPEAT_ONE
         RepeatMode saved = g_playlist.repeat;
         if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
         int n = pl_next(&g_playlist);
@@ -380,12 +376,20 @@ static void input_player(void)
         audio_set_volume(v);
         g_settings.volume = v;
     }
+    /* Save volume quand on relache */
     if ((g_input.up & KEY_UP) || (g_input.up & KEY_DOWN))
         settings_mark_dirty();
 
-    if (kd & KEY_ZL) audio_seek(audio_get_position() - 10);
-    if (kd & KEY_ZR) audio_seek(audio_get_position() + 10);
-
+    if (kd & KEY_ZL) {
+        { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
+          if(_f){fprintf(_f,"ZL pressed pos=%d\n",audio_get_position());fclose(_f);} }
+        audio_seek(audio_get_position() - 10);
+    }
+    if (kd & KEY_ZR) {
+        { FILE *_f=fopen("sdmc:/3DSoundShell/debug.log","a");
+          if(_f){fprintf(_f,"ZR pressed pos=%d\n",audio_get_position());fclose(_f);} }
+        audio_seek(audio_get_position() + 10);
+    }
     if (kd & KEY_R) {
         player_ui_cycle_viz(&g_player_ui);
         g_settings.viz_style = g_player_ui.viz_style;
@@ -402,11 +406,16 @@ static void input_player(void)
 
     handle_touch_seek();
 
-    /* Boutons tactiles ecran du bas */
+    /* ── Boutons tactiles ecran du bas ──────────────────────────
+       Coordonnees identiques a player_ui_draw_bottom :
+       Prec    : X=14  a 94,  Y=36 a 56
+       Pause   : X=110 a 190, Y=36 a 56
+       Suiv    : X=222 a 302, Y=36 a 56 */
     if (g_input.touch_down) {
         int tx = g_input.touch.px;
         int ty = g_input.touch.py;
 
+        /* Bouton <- Prec (X=14 a 94, Y=36 a 56) */
         if (tx >= 14 && tx <= 94 && ty >= 36 && ty <= 56) {
             RepeatMode saved = g_playlist.repeat;
             if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
@@ -414,9 +423,11 @@ static void input_player(void)
             g_playlist.repeat = saved;
             if (n >= 0) play_current_track();
         }
+        /* Bouton Pause/Play (X=110 a 190, Y=36 a 56) */
         else if (tx >= 110 && tx <= 190 && ty >= 36 && ty <= 56) {
             audio_toggle_pause();
         }
+        /* Bouton Suiv -> (X=222 a 302, Y=36 a 56) */
         else if (tx >= 222 && tx <= 302 && ty >= 36 && ty <= 56) {
             RepeatMode saved = g_playlist.repeat;
             if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
@@ -425,16 +436,14 @@ static void input_player(void)
             if (n >= 0) play_current_track();
             else        audio_stop();
         }
-        /* V0.97 : Bouton tactile play/pause sleep timer (bas droite) */
-        else if (sleep_timer_is_active()
-                 && tx >= 230 && tx <= 312
-                 && ty >= 180 && ty <= 212) {
-            if (sleep_timer_is_paused()) sleep_timer_resume();
-            else sleep_timer_pause();
-        }
     }
 
-    /* V0.97 : Auto-avance deplacee dans la boucle main pour marcher partout */
+    /* Auto-avance */
+    if (audio_is_finished()) {
+        int n = pl_next(&g_playlist);
+        if (n >= 0) play_current_track();
+        else        audio_stop();
+    }
 }
 
 /* ── Input: Playlist ──────────────────────────────────────── */
@@ -534,16 +543,11 @@ static void input_playlist(void)
 /* ── Input: Settings ──────────────────────────────────────── */
 static void input_settings(void)
 {
-    AppState old_state = g_state;
     settings_handle_input(&g_settings_sel, g_input.down);
     if (g_input.down & KEY_B)      g_state = STATE_PLAYER;
     if (g_input.down & KEY_START)  g_state = STATE_PLAYER;
     if (g_input.down & KEY_SELECT) g_state = STATE_FILE_BROWSER;
     if (g_input.down & KEY_L)      g_state = STATE_EQUALIZER;
-    /* V0.96 : force save quand on quitte settings pour eviter perte */
-    if (old_state == STATE_SETTINGS && g_state != STATE_SETTINGS) {
-        settings_save_sync();
-    }
 }
 
 /* ── Input: Equalizer ─────────────────────────────────────── */
@@ -574,9 +578,9 @@ static void draw_frame(float dt)
 
     /* Ecran de chargement si init pas terminee */
     if (!g_init_done) {
-        /* Fond theme normal (init n a jamais lieu en mode eco) */
         C2D_TargetClear(g_top, current_theme->bg_primary);
         C2D_SceneBegin(g_top);
+        /* Texte de chargement */
         static C2D_TextBuf load_tb = NULL;
         if (!load_tb) load_tb = C2D_TextBufNew(64);
         C2D_TextBufClear(load_tb);
@@ -598,26 +602,16 @@ static void draw_frame(float dt)
     C2D_TargetClear(g_top, current_theme->bg_primary);
     C2D_SceneBegin(g_top);
 
-    /* V0.97 : "Chargement..." SEULEMENT dans le player, ailleurs on rend normal */
-    if (g_loading && g_state == STATE_PLAYER) {
+    if (g_loading) {
         static C2D_TextBuf load_tb = NULL;
         if (!load_tb) load_tb = C2D_TextBufNew(64);
         C2D_TextBufClear(load_tb);
         C2D_Text tx;
         C2D_TextParse(&tx, load_tb, "Chargement...");
         C2D_TextOptimize(&tx);
-        if (power_save_is_active()) {
-            C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, C2D_Color32(0, 0, 0, 255));
-            C2D_DrawText(&tx, C2D_AlignCenter|C2D_WithColor,
-                200, 110, 0, 0.7f, 0.7f, g_settings.power_save_text_color);
-        } else {
-            C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, current_theme->bg_primary);
-            C2D_DrawText(&tx, C2D_AlignCenter|C2D_WithColor,
-                200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
-        }
-    } else if (power_save_is_active()) {
-        /* V0.96 : Mode economie energie - ecran haut minimaliste */
-        power_save_draw_top(meta);
+        C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, current_theme->bg_primary);
+        C2D_DrawText(&tx, C2D_AlignCenter|C2D_WithColor,
+            200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
     } else {
         g_3d_iod = iod;
         g_3d_eye = 0; /* oeil gauche */
@@ -634,24 +628,16 @@ static void draw_frame(float dt)
     if (iod > 0.f && g_top_right) {
         C2D_TargetClear(g_top_right, current_theme->bg_primary);
         C2D_SceneBegin(g_top_right);
-        if (g_loading && g_state == STATE_PLAYER) {
+        if (g_loading) {
             static C2D_TextBuf load_tb_r = NULL;
             if (!load_tb_r) load_tb_r = C2D_TextBufNew(64);
             C2D_TextBufClear(load_tb_r);
             C2D_Text tx_r;
             C2D_TextParse(&tx_r, load_tb_r, "Chargement...");
             C2D_TextOptimize(&tx_r);
-            if (power_save_is_active()) {
-                C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, C2D_Color32(0, 0, 0, 255));
-                C2D_DrawText(&tx_r, C2D_AlignCenter|C2D_WithColor,
-                    200, 110, 0, 0.7f, 0.7f, g_settings.power_save_text_color);
-            } else {
-                C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, current_theme->bg_primary);
-                C2D_DrawText(&tx_r, C2D_AlignCenter|C2D_WithColor,
-                    200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
-            }
-        } else if (power_save_is_active()) {
-            power_save_draw_top(meta);
+            C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, TOP_HEIGHT, current_theme->bg_primary);
+            C2D_DrawText(&tx_r, C2D_AlignCenter|C2D_WithColor,
+                200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
         } else if (!g_loading) {
             g_3d_eye = 1; /* oeil droit */
             switch (g_state) {
@@ -667,17 +653,12 @@ static void draw_frame(float dt)
     /* Bottom screen */
     C2D_TargetClear(g_bot, current_theme->bg_primary);
     C2D_SceneBegin(g_bot);
-    if (power_save_is_active()) {
-        /* V0.97 : mode eco - overlay noir sur ecran bas (backlight non touche) */
-        C2D_DrawRectSolid(0, 0, 0, BOT_WIDTH, BOT_HEIGHT, C2D_Color32(0, 0, 0, 255));
-    } else {
     switch (g_state) {
         case STATE_FILE_BROWSER: fb_draw_bottom(&g_browser);                           break;
         case STATE_PLAYER:       player_ui_draw_bottom(&g_player_ui, meta, &g_playlist); break;
         case STATE_PLAYLIST:     pl_draw_bottom(&g_playlist);                          break;
         case STATE_SETTINGS:     settings_draw_bottom(&g_settings_sel);               break;
         case STATE_EQUALIZER:    eq_draw_bottom(g_eq_band);                           break;
-    }
     }
 
     C3D_FrameEnd(0);
@@ -739,17 +720,30 @@ static void init_thread_func(void *arg)
         g_playlist.shuffle = false;
 
         pl_add_dir(&g_playlist, resume_dir);
-        
+
+        dbg("init: pl_add_dir done");
+        {
+            FILE *f = fopen("sdmc:/3DSoundShell/debug.log","a");
+            if(f) {
+                fprintf(f, "init: count=%d looking for: %s\n",
+                    g_playlist.count, g_settings.last_path);
+                for(int i=0;i<g_playlist.count && i<5;i++)
+                    fprintf(f, "  [%d] %s\n", i, g_playlist.items[i].path);
+                fclose(f);
+            }
+        }
 
         int found = 0;
         for (int i = 0; i < g_playlist.count; i++) {
             if (!strcmp(g_playlist.items[i].path, g_settings.last_path)) {
                 pl_jump(&g_playlist, i);
                 found = 1;
+                dbg("init: track found!");
                 break;
             }
         }
         if (!found) {
+            dbg("init: track NOT found, jumping to 0");
             if (g_playlist.count > 0) pl_jump(&g_playlist, 0);
         }
 
@@ -759,6 +753,7 @@ static void init_thread_func(void *arg)
     }
 
     g_init_done = true;
+    dbg("init_thread: done");
 }
 
 
@@ -785,13 +780,7 @@ static void draw_splash_screen(void)
     static C2D_TextBuf splash_tb = NULL;
     if (!splash_tb) splash_tb = C2D_TextBufNew(512);
 
-    int SPLASH_FRAMES;
-    /* Duree splash selon settings : 0=OFF, 1-7 = 0.2s a 3s */
-    const int dur_frames[] = {0, 12, 30, 60, 90, 120, 150, 180};
-    int d = g_settings.splash_duration;
-    if (d < 0 || d > 7) d = 5;
-    SPLASH_FRAMES = dur_frames[d];
-    if (SPLASH_FRAMES == 0) return;  /* OFF = pas de splash */  /* 2s a 60fps */
+    const int   SPLASH_FRAMES = 60;  /* 2s a 60fps */
     const int   NUM_BARS      = 20;
     float       bar_heights[20] = {0};
     float       bar_targets[20];
@@ -974,38 +963,10 @@ static void apt_hook_callback(APT_HookType hook, void* param)
 {
     (void)param;
     switch (hook) {
-        case APTHOOK_ONSUSPEND:
-        case APTHOOK_ONSLEEP:
-            /* V0.96 : avant HOME/veille → forcer restauration ecran
-               pour ne pas laisser le systeme geler avec un ecran off custom */
-            power_save_force_restore();
-            /* V0.97 : power_save_force_restore a deja restaure la vraie lum */
-            /* Rien de plus a faire ici */
-            /* V0.96 : IMPERATIF reactiver le Wi-Fi avant HOME/veille
-               sinon le systeme reste sans Wi-Fi ! */
-            wifi_manager_enable();
-            break;
         case APTHOOK_ONWAKEUP:
         case APTHOOK_ONRESTORE:
-            /* Console reouverte ou retour depuis HOME */
+            /* Console reouverte ou retour depuis HOME : refresh LED */
             s_force_led_refresh = true;
-            /* V0.97 : resync lum systeme (user peut l avoir change en HOME) */
-            power_save_sync_brightness();
-            /* V0.96 : ré-appliquer le mode eco si actif */
-            power_save_refresh();
-            /* V0.96 : recouper le wifi si option ON */
-            if (g_settings.wifi_off_in_app) wifi_manager_disable();
-            break;
-
-        case APTHOOK_ONEXIT:
-            /* V0.97 : IMPERATIF reactiver le wifi avant fermeture brutale */
-            wifi_manager_enable();
-            /* V0.97 : juste rallumer les backlight (on ne touche pas au brightness) */
-            {
-                gspLcdInit();
-                GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_TOP | GSPLCD_SCREEN_BOTTOM);
-                gspLcdExit();
-            }
             break;
         default:
             break;
@@ -1043,8 +1004,6 @@ static void update_led(void)
         AudioState st = audio_get_state();
         if (st == AUDIO_PLAYING) should_be_on = true;
     }
-    /* V0.96 : eteindre LED en mode eco energie */
-    if (power_save_is_active()) should_be_on = false;
 
     /* === DETECTION DES NOTIFICATIONS SYSTEME ===
        On lit l etat actuel de la LED via MCUHWC_ReadRegister
@@ -1139,15 +1098,23 @@ int main(int argc, char *argv[])
     mkdir("sdmc:/Music",        0777);
 
     /* Vider / créer le log */
+    {
+        FILE *f = fopen("sdmc:/3DSoundShell/debug.log", "w");
+        if (f) { fprintf(f, "=== 3DSoundShell start ===\n"); fclose(f); }
+    }
+    dbg("step 1: gfx ok");
 
     /* ── 2. Citro ─────────────────────────────────────────── */
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE)) {
+        dbg("ERREUR: C3D_Init failed");
         gfxExit(); romfsExit(); return 1;
     }
     if (!C2D_Init(C2D_DEFAULT_MAX_OBJECTS)) {
+        dbg("ERREUR: C2D_Init failed");
         C3D_Fini(); gfxExit(); romfsExit(); return 1;
     }
     C2D_Prepare();
+    dbg("step 2: citro ok");
 
     /* ── 3. Render targets ────────────────────────────────── */
     g_top = C2D_CreateScreenTarget(GFX_TOP,    GFX_LEFT);
@@ -1155,37 +1122,21 @@ int main(int argc, char *argv[])
     g_top_right = C2D_CreateScreenTarget(GFX_TOP, GFX_RIGHT);
     gfxSet3D(true); /* Activer 3D stereoscopique */
     if (!g_top || !g_bot || !g_top_right) {
+        dbg("ERREUR: render targets failed");
         C2D_Fini(); C3D_Fini(); gfxExit(); romfsExit(); return 1;
     }
+    dbg("step 3: render targets ok");
 
     /* ── 4. Services optionnels ───────────────────────────── */
     cfguInit();
     ptmuInit();
     mcuHwcInit();
-
-    /* V0.97 : test CFGU pour lum */
-    {
-        u8 lum = 0;
-        Result r = CFGU_GetConfigInfoBlk2(1, 0x00050001, &lum);
-        char fname[128];
-        snprintf(fname, 128, "sdmc:/3DSoundShell/lum_cfgu_%llu.log", (unsigned long long)(osGetTime() % 1000000));
-        FILE *ff = fopen(fname, "w");
-        if (ff) { fprintf(ff, "rc=%08lX val=%d", r, lum); fclose(ff); }
-        if (R_SUCCEEDED(r) && lum >= 1 && lum <= 5) s_startup_brightness = lum;
-        else s_startup_brightness = 5;
-    }
-
     srand((unsigned)osGetTime());
 
     /* Enregistrer hook APT pour refresh LED apres wakeup/restore */
     aptHook(&s_apt_cookie, apt_hook_callback, NULL);
     APT_CheckNew3DS(&g_is_new3ds); /* détection modèle une seule fois */
-
-    /* V0.97 : Sur New 3DS, liberer les cores caches (30% -> 80% CPU dispo)
-       Necessaire pour le WSOLA en temps reel */
-    if (g_is_new3ds) {
-        APT_SetAppCpuTimeLimit(80);
-    }
+    dbg("step 4: services ok");
 
     /* ── 5. Thème & settings ──────────────────────────────── */
     theme_init();
@@ -1193,37 +1144,29 @@ int main(int argc, char *argv[])
     fav_load();
     theme_set(theme_get(g_settings.theme_index));
     acInit(); /* Réseau pour vérif MAJ */
-    /* V0.96 : ne lance QUE update_check, qui declenchera ping_stats
-       apres pour eviter contention HTTPC */
-    update_check_start(); /* timer demarre dans update.c */
+    update_check_start();
+    ping_stats_start(); /* Ping serveur stats */ /* timer demarre dans update.c */
+    dbg("step 5: theme+settings ok");
 
     /* ── 6. Audio (NDSP) ──────────────────────────────────── */
     Result audio_rc = audio_init();
-    
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "step 6: audio_init=%ld", audio_rc);
+        dbg(buf);
+    }
     if (R_FAILED(audio_rc)) {
+        dbg("ERREUR: audio_init failed — on continue sans audio");
         /* On ne quitte pas, on continue en mode silencieux */
     }
     audio_set_volume(g_settings.volume);
     if (g_settings.playback_speed > 0.01f)
         audio_set_speed(g_settings.playback_speed);
+    dbg("step 6b: volume set");
 
     /* EQ */
     for (int i = 0; i < EQ_BANDS; i++)
         audio_eq_set_gain(i, g_settings.eq_gains[i]);
-
-    /* V0.95 : Preview metadonnees asynchrone */
-    preview_init();
-
-    /* V0.96 : Mode economie energie */
-    power_save_init();
-
-    /* V0.96 : Wi-Fi manager (init tot mais coupe le wifi seulement apres 20s si option ON) */
-    wifi_manager_init();
-
-    /* V0.97 : Sleep timer */
-    sleep_timer_init();
-    if (g_settings.sleep_timer_min > 0)
-        sleep_timer_start(g_settings.sleep_timer_min);
 
     /* ── 7. UI (init rapide, pas de scan SD ici) ───────────── */
     pl_init(&g_playlist);
@@ -1241,9 +1184,11 @@ int main(int argc, char *argv[])
 
     /* Restaurer viz_style sauvegardé */
     g_player_ui.viz_style = g_settings.viz_style;
+    dbg("step 7: UI ok");
 
     /* ── 7b. SPLASH SCREEN ANIME ───────────────────────── */
     draw_splash_screen();
+    dbg("step 7b: splash done");
 
     /* ── 8. Thread d init SD (scan en arriere-plan) ─────── */
     static char s_init_path[512];
@@ -1252,6 +1197,9 @@ int main(int argc, char *argv[])
         511);
 
     threadCreate(init_thread_func, s_init_path, 32*1024, 0x30, -1, true);
+    dbg("step 8: init thread lance");
+
+    dbg("step 8: init thread started");
 
     /* ── Boucle principale ────────────────────────────────── */
     u64 last_time    = osGetTime();
@@ -1266,73 +1214,20 @@ int main(int argc, char *argv[])
 
         input_update(&g_input);
 
-        /* V0.97 : power_save_update gere B hold 500ms pour quitter */
-        power_save_update(g_input.down | g_input.held, g_input.touch_down);
-
-        /* V0.97 : En mode eco, intercepter TOUTES les touches
-           Seules certaines actions sont autorisees (economie CPU) */
-        if (power_save_is_active()) {
-            /* A = pause/play */
-            if (g_input.down & KEY_A) {
-                audio_toggle_pause();
-            }
-
-            /* Fleche gauche/droite = changer de piste */
-            if (g_input.down & KEY_LEFT) {
-                RepeatMode saved = g_playlist.repeat;
-                if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
-                int n = pl_prev(&g_playlist);
-                g_playlist.repeat = saved;
-                if (n >= 0) play_current_track();
-            }
-            if (g_input.down & KEY_RIGHT) {
-                RepeatMode saved = g_playlist.repeat;
-                if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
-                int n = pl_next(&g_playlist);
-                g_playlist.repeat = saved;
-                if (n >= 0) play_current_track();
-                else        audio_stop();
-            }
-
-            /* L + R = changer couleur horloge (cycle presets) */
-            if ((g_input.down & KEY_L) && (g_input.held & KEY_R)) {
-                g_settings.power_save_color_mode = (g_settings.power_save_color_mode + 1) % 11;
-                settings_mark_dirty();
-            } else if ((g_input.down & KEY_R) && (g_input.held & KEY_L)) {
-                g_settings.power_save_color_mode = (g_settings.power_save_color_mode + 1) % 11;
-                settings_mark_dirty();
-            }
-
-            /* Y = pause/play sleep timer si actif */
-            if (g_input.down & KEY_Y) {
-                if (sleep_timer_is_active()) {
-                    if (sleep_timer_is_paused()) sleep_timer_resume();
-                    else sleep_timer_pause();
-                }
-            }
-
-            /* B = quitter mode eco (gere par power_save_update via hold 500ms) */
-            /* Consommer B pour ne pas faire retour */
-            g_input.down &= ~KEY_B;
-            g_input.held &= ~KEY_B;
-
-            /* TOUT LE RESTE = consomme (rien ne passe) */
-            g_input.down = 0;
-            g_input.held = 0;
-            g_input.touch_down = false;
-            g_input.touch_held = false;
-        }
-
         /* Resume session une fois init terminee */
         if (g_init_done && !resumed) {
             resumed = true;
+            dbg("resume: starting");
             if (g_settings.resume_on_start &&
                 g_settings.last_path[0] &&
                 g_playlist.count > 0) {
+                dbg("resume: avant audio_load");
                 play_current_track();
+                dbg("resume: apres audio_load");
                 if (g_settings.last_position > 0)
                     audio_seek(g_settings.last_position);
                 g_state = STATE_PLAYER;
+                dbg("resume: done");
             }
         }
 
@@ -1359,26 +1254,13 @@ int main(int argc, char *argv[])
         if (g_player_ui.viz_style != g_settings.viz_style)
             g_player_ui.viz_style = g_settings.viz_style;
 
-        /* V0.96 : skip player_ui_update en mode eco (economie CPU) */
-        if (!power_save_is_active())
-            player_ui_update(&g_player_ui, audio_get_metadata(), dt);
-
-        /* V0.97 : Update sleep timer (peut arreter l audio) */
-        sleep_timer_update();
+        player_ui_update(&g_player_ui, audio_get_metadata(), dt);
 
         /* Debounce : save si settings modifies depuis 3sec (fix freeze SD lente) */
         settings_update();
 
         /* Update LED notification */
         update_led();
-
-        /* V0.97 : Auto-avance GLOBALE - marche dans toutes les pages
-           FIX : ne pas declencher pendant chargement (etat transitoire finished) */
-        if (audio_is_finished() && !g_loading) {
-            int n = pl_next(&g_playlist);
-            if (n >= 0) play_current_track();
-            else        audio_stop();
-        }
 
         /* Sauvegarde toutes les 2 min en arriere-plan */
         if (++save_timer > 7200) { /* 2 min a 60fps */
@@ -1392,48 +1274,10 @@ int main(int argc, char *argv[])
             }
         }
 
-        /* V0.95 : demande preview UNIQUEMENT quand la selection change
-           (evite de spammer le worker thread 60x/sec = lag audio) */
-        static int last_prev_sel = -999;
-        static int last_prev_count = -1;
-        static AppState last_prev_state = STATE_PLAYER;
-        if (g_state == STATE_FILE_BROWSER && !g_browser_loading
-            && g_browser.count > 0
-            && g_browser.selected >= 0
-            && g_browser.selected < g_browser.count
-            && (g_browser.selected != last_prev_sel
-                || g_browser.count != last_prev_count
-                || g_state != last_prev_state))
-        {
-            last_prev_sel = g_browser.selected;
-            last_prev_count = g_browser.count;
-            last_prev_state = g_state;
-            FileEntry *fe = &g_browser.entries[g_browser.selected];
-            if (fe->is_audio) {
-                preview_request(fe->full_path);
-            } else {
-                for (int i = 0; i < g_browser.count; i++) {
-                    if (g_browser.entries[i].is_audio) {
-                        preview_request(g_browser.entries[i].full_path);
-                        break;
-                    }
-                }
-            }
-        }
-
-        /* V0.95 : upload GPU covers preview UNIQUEMENT dans file browser */
-        if (g_state == STATE_FILE_BROWSER)
-            preview_update_gpu();
-
         if (g_update_notif_timer > 0) g_update_notif_timer--;
         draw_frame(dt);
 
-        /* V0.96 : en mode eco, on peut se permettre 1 FPS (economie CPU/GPU) */
-        if (power_save_is_active()) {
-            svcSleepThread(500000000LL); /* 500ms = 2 FPS max */
-        }
-
-        /* Limiteur 60fps */
+        /* Limiteur 60fps simple */
         u64 frame_end = osGetTime();
         u64 frame_ms  = frame_end - now;
         if (frame_ms < 16)
@@ -1443,7 +1287,9 @@ int main(int argc, char *argv[])
     /* ── Nettoyage (UNE SEULE FOIS chaque service) ────────── */
     g_settings.last_position = audio_get_position();
     g_settings.last_track    = g_playlist.current;
+    dbg("cleanup start");
     settings_save_sync();
+    dbg("cleanup: save done");
 
     /* Eteindre LED */
     {
@@ -1453,23 +1299,8 @@ int main(int argc, char *argv[])
         MCUHWC_SetInfoLedPattern(&off);
     }
 
-    /* V0.97 : juste rallumer les backlight avant de quitter */
-    gspLcdInit();
-    GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_TOP | GSPLCD_SCREEN_BOTTOM);
-    gspLcdExit();
-
     /* Retirer hook APT */
     aptUnhook(&s_apt_cookie);
-
-    power_save_exit();
-
-    /* V0.97 : Cleanup sleep timer */
-    sleep_timer_exit();
-
-    /* V0.96 : IMPERATIF reactiver le Wi-Fi avant de quitter ! */
-    wifi_manager_exit();
-
-    preview_exit();
 
     player_ui_exit(&g_player_ui);
     audio_exit();
@@ -1482,5 +1313,7 @@ int main(int argc, char *argv[])
     cfguExit();
     gfxExit();
     romfsExit();
+
+    dbg("cleanup done");
     return 0;
 }
