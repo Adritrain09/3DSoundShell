@@ -1,3 +1,4 @@
+// audio.h
 #pragma once
 #include <3ds.h>
 #include <stdbool.h>
@@ -69,6 +70,40 @@ const AudioMetadata *audio_get_metadata(void);
 // Visualizer (returns amplitude per band, 0.0-1.0)
 void  audio_get_visualizer(float out[EQ_BANDS]);
 void  audio_get_visualizer_fft(float out[EQ_BANDS]);
+
+/* V0.96 : desactiver temporairement le calcul viz (mode eco energie) */
+void  audio_set_viz_active(bool active);
+
+/* V0.97 : Crossfade - precache la piste suivante en PCM
+   Retourne true si le precache a reussi
+   duration_sec : combien de secondes precacher (max 5) */
+bool  audio_xfade_precache(const char *path, int duration_sec);
+
+/* V0.97 : Precache asynchrone - lance dans un thread separe (pas de freeze) */
+void  audio_xfade_precache_async(const char *path, int duration_sec);
+
+/* V0.97 : Demarre la lecture du buffer precache sur canal 1
+   Doit etre appele quand on veut declencher le crossfade */
+void  audio_xfade_start(void);
+
+/* V0.97 : Applique les volumes crossfade
+   vol_current : 0.0 a 1.0 (canal 0, piste actuelle)
+   vol_next    : 0.0 a 1.0 (canal 1, piste suivante) */
+void  audio_xfade_set_mix(float vol_current, float vol_next);
+
+/* V0.97 : Arrete le crossfade et libere le buffer precache */
+void  audio_xfade_stop(void);
+
+/* V0.97 : Retourne true si le buffer est preche pour ce path */
+bool  audio_xfade_is_precached(const char *path);
+
+/* V0.97 : Retourne true si le crossfade est en cours */
+bool  audio_xfade_is_active(void);
+
+/* V0.97 : recupere les samples bruts pour l oscilloscope
+   Retourne le nombre de samples ecrits (max 256)
+   Les samples sont normalises entre -1.0 et 1.0 (mono, moyenne stereo) */
+int   audio_get_oscillo(float out[256]);
 
 // Equalizer
 void  audio_eq_set_gain(int band, float db);

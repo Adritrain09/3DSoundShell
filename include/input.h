@@ -1,3 +1,4 @@
+// input.h
 #pragma once
 #include <3ds.h>
 #include <stdbool.h>

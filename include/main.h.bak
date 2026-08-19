@@ -5,15 +5,13 @@
 #define VERSION_URL "http://copyparty.hosten.uk/Publique-Adri/version.txt?raw"
 extern char g_latest_version[16];
 extern bool g_update_available;
-extern bool g_server_unreachable;   /* V0.96 : serveur MAJ inaccessible */
-extern bool g_version_ahead;        /* V0.96 : version installee > enregistree */
 extern int  g_update_notif_timer;
 extern bool g_is_new3ds;
 void update_check_start(void);
 void draw_update_notif_timed(void); /* affiche notif MAJ si timer actif */
 
 // ─── Version ──────────────────────────────────────────────
-#define APP_VERSION "0.97"
+#define APP_VERSION "0.94"
 
 #include <3ds.h>
 #include <citro2d.h>

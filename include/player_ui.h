@@ -1,3 +1,4 @@
+// player_ui.h
 #pragma once
 #include <citro2d.h>
 #include <3ds.h>
@@ -11,6 +12,10 @@ typedef enum {
     VIZ_WAVE,
     VIZ_CIRCLE,
     VIZ_FIRE,
+    VIZ_OSCILLO,
+    VIZ_WAVES,     /* V0.97 : vagues colorees */
+    VIZ_TUNNEL,    /* V0.97 : tunnel 3D warp */
+    VIZ_PULSE,     /* V0.97 : explosion beat */
     VIZ_EQ,
     VIZ_COUNT
 } VisualizerStyle;
