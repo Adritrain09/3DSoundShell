@@ -11,7 +11,7 @@ README généré par claude.ai et modifié par.. bas.. moi:
 ## ✨ Fonctionnalités
 
 - 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS.
-- 🎨 **Thèmes** : Dark, Light, Neon Purple, Forest — et 16 thèmes personnalisés via fichier .ini
+- 🎨 **Thèmes** : Dark, Light, Neon Purple, Forest — et 128 thèmes personnalisés via fichier .ini
 - 📁 **Explorateur de fichiers** style 3DShell (tri alphabétique, dossiers/fichiers, navigation complète)
 - 🔀 **Lecture aléatoire** (Fisher-Yates shuffle)
 - 🔁 **Répétition** : Désactivée / Une piste / Toute la playlist
