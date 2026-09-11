@@ -8,6 +8,12 @@ Ceci est un lecteur de music pour la 2/3DS inspiré de **3DShell** et de **CTRMU
 README généré par claude.ai et modifié par.. bas.. moi:
 ---
 
+## ⚠ Avertissement!
+
+⚠ Si vous rencontrez des ralentissements sur votre musique, c'est que le format ou la taille n'est pas bien pris en charge par l'application. En revanche, si ces ralentissements sont répétés, redémarrez l'application. ⚠
+
+---
+
 ## ✨ Fonctionnalités
 
 - 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS.
