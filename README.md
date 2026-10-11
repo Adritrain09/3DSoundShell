@@ -199,4 +199,4 @@ Projet homebrew open-source. Aucune affiliation avec Nintendo.
 ---
 
 ## Truc en plus
-Du fait que je ne sais pas codé je dois demandé a des IA, donc ne me demandé pas de codé un truc en plus je ne serais pas faire. Et désolé pour les fautes d'orthographes.
+Du fait que je ne sais pas codé je dois demandé a des IA, donc ne me demandé pas de codé un truc en plus je ne serais pas faire, mais vous pouvez proposé vos idée sur le site officiel ou le Discord. Et désolé pour les fautes d'orthographes.
