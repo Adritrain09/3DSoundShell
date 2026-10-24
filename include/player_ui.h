@@ -16,6 +16,7 @@ typedef enum {
     VIZ_WAVES,     /* V0.97 : vagues colorees */
     VIZ_TUNNEL,    /* V0.97 : tunnel 3D warp */
     VIZ_PULSE,     /* V0.97 : explosion beat */
+    VIZ_WAVEFORM,  /* V0.98 : Barres type dictaphone */
     VIZ_EQ,
     VIZ_COUNT
 } VisualizerStyle;
@@ -46,3 +47,5 @@ void player_ui_draw_bottom(PlayerUI *ui, const AudioMetadata *meta,
 void player_ui_cycle_viz(PlayerUI *ui);
 void player_ui_exit(PlayerUI *ui);
 void player_ui_load_cover(PlayerUI *ui, const AudioMetadata *meta);
+void player_ui_draw_splash_viz(VisualizerStyle style, float x, float y, float w, float h, float alpha, int frame);
+void cycle_dev_event_mode(void);

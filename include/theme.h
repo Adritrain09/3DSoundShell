@@ -49,7 +49,7 @@ typedef struct {
 } Theme;
 
 // ─── Max thèmes custom depuis SD ──────────────────────────────
-#define MAX_CUSTOM_THEMES 16
+#define MAX_CUSTOM_THEMES 128
 #define THEMES_DIR "sdmc:/3DSoundShell/themes"
 
 // ─── Built-in themes ──────────────────────────────────────────

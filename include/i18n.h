@@ -8,7 +8,7 @@
 #include "settings.h"
 #include <string.h>
 
-#define I18N_COUNT 176
+#define I18N_COUNT 189
 
 typedef struct {
     const char *fr;
@@ -189,6 +189,29 @@ static const I18nEntry i18n_table[I18N_COUNT] = {
     {"Mode economie d energie", "Power saving mode"},
     {"Maintenir B (0.5s) pour quitter le mode eco",
      "Hold B (0.5s) to exit eco mode"},
+    {"Retroeclairage eco",      "Eco backlight"},
+    {"Lum apres eco",           "Brightness after eco"},
+    {"Non disponible",          "Not available"},
+    {"REDUIRE",                 "REDUCE"},
+    {"ETEINDRE",                "TURN OFF"},
+
+    {"Reveil", "Alarm"},
+    {"Heure (HH)", "Hour (HH)"},
+    {"Minute (MM)", "Minute (MM)"},
+    {"Musique (Custom)", "Music (Custom)"},
+    {"LANCER MODE NUIT", "START NIGHT MODE"},
+    {"Piste Actuelle", "Current Track"},
+    {"> PRESSER A <", "> PRESS A <"},
+    {"[REVEIL INACTIF]", "[ALARM DISABLED]"},
+
+    /* ===== Player - touches ===== */
+    {"Lecture clapet ferme",          "Play console lib close"},
+    {"Vitesse (pro)",                 "Speed (pro)"},
+    {"Pitch (pro)",                   "Pitch (pro)"},
+    {"Vitesse + Pitch (fun)",         "Speed + Pitch (fun)"},
+    {"Son blanc anti-veille",         "White noise keep-alive"},
+    {"Distorsion (fun)",              "Distortion (fun)"},
+    {"Magnetophone",                  "Microphone Recorder"},
 };
 
 

@@ -41,12 +41,34 @@ typedef struct {
     float gain[EQ_BANDS];  // -12.0 to +12.0 dB
     const char *name;
 } EQPreset;
+extern EQPreset eq_preset_custom;
 
 // ─── Audio engine API ─────────────────────────────────────────
 Result audio_init(void);
 void   audio_exit(void);
 
 Result audio_load(const char *path);
+
+/* Lecture d un fichier encore en cours de telechargement (Navidrome).
+   Tant que audio_stream_begin() est actif, le decodeur attend l arrivee de
+   nouvelles donnees au lieu de conclure a une fin de piste quand il touche la
+   fin du fichier. audio_stream_end() doit TOUJOURS etre appele a la fin du
+   transfert (reussi ou non), sinon la lecture reste bloquee en attente. */
+void   audio_stream_begin(void);
+void   audio_stream_end(void);
+bool   audio_stream_active(void);
+/* Duree connue du serveur : mpg123 ne peut pas la deduire d un fichier
+   incomplet, on la lui fournit pour l affichage et la barre de progression. */
+void   audio_set_duration_hint(int seconds);
+
+/* Un flux reseau (Navidrome) est-il la source actuelle ? Si oui, EQ et
+   SoundTouch (vitesse/pitch) sont forces neutres cote moteur audio, quels que
+   soient les reglages de l utilisateur - le budget CPU d un flux reseau ne
+   laisse pas de marge pour ces effets, et les deux lecteurs (local/Navidrome)
+   doivent rester separes. A appeler avant de lancer une lecture Navidrome, et
+   a desactiver en revenant a la bibliotheque locale. */
+void   audio_set_network_source(bool on);
+bool   audio_is_network_source(void);
 void   audio_play(void);
 void   audio_pause(void);
 void   audio_stop(void);
@@ -116,4 +138,11 @@ extern EQPreset eq_preset_bass_boost;
 extern EQPreset eq_preset_vocal;
 extern EQPreset eq_preset_rock;
 extern EQPreset eq_preset_classical;
+int audio_viz11_gap(void); /* VIZ11 */
 extern EQPreset eq_preset_electronic;
+void audio_viz_tick(void); /* VIZ14d */
+
+void audio_start_white_noise(void);
+void audio_update_white_noise_volume(void);
+void audio_stop_white_noise(void);
+int audio_is_white_noise_active(void);
