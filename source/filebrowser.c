@@ -21,17 +21,14 @@
 
 static bool ext_match(const char *name)
 {
-    const char *exts[] = {
-        ".mp3",".mp2",".ogg",".oga",".flac",
-        ".wav",".opus",
-        NULL
-        /* AAC, AIFF, WMA, AC3 non supportes sur 3DS */
-    };
-    const char *dot = strrchr(name,'.');
-    if(!dot) return false;
-    for(int i=0;exts[i];i++)
-        if(!strcasecmp(dot, exts[i])) return true;
-    return false;
+    const char *e = strrchr(name, '.');
+    if (!e) return false;
+    /* EXT2 : liste complete, m4a/mp4/aac inclus (decodeur audio.c OK) */
+    return !strcasecmp(e, ".mp3") || !strcasecmp(e, ".mp2") ||
+           !strcasecmp(e, ".ogg") || !strcasecmp(e, ".oga") ||
+           !strcasecmp(e, ".flac") || !strcasecmp(e, ".wav") ||
+           !strcasecmp(e, ".opus") || !strcasecmp(e, ".m4a") ||
+           !strcasecmp(e, ".mp4") || !strcasecmp(e, ".aac");
 }
 
 static void fb_sort(FileBrowser *fb); // forward declaration
@@ -58,7 +55,7 @@ void fb_init(FileBrowser *fb, const char *start_path)
 
 void fb_enter_dir(FileBrowser *fb, const char *path)
 {
-    strncpy(fb->cwd, path, MAX_PATH-1);
+    if (path != fb->cwd) strncpy(fb->cwd, path, MAX_PATH-1);
     fb->selected = 0;
     fb->scroll_offset = 0;
     fb_reload(fb);

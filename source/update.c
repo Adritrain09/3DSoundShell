@@ -333,9 +333,10 @@ static void ping_stats_thread(void *arg)
 
     httpcExit();
 
-    /* V0.97 : Couper le wifi si option ON (fin du ping stats) */
+    /* V0.97 : Couper le wifi si option ON (sauf si l'utilisateur est sur Navidrome !) */
     extern Settings g_settings;
-    if (g_settings.wifi_off_in_app) {
+    extern AppState g_state;
+    if (g_settings.wifi_off_in_app && g_state != STATE_NAVIDROME) {
         svcSleepThread(1000000000LL); /* 1s de securite */
         wifi_manager_disable();
     }

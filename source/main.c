@@ -1,8 +1,10 @@
+extern bool nd_session_active(void);
 /*
 ** main.c — 3DSoundShell
 ** 3DSoundShell - Music Player by Adri
 */
 #include <3ds.h>
+#include <dirent.h>
 #include <citro2d.h>
 #include <citro3d.h>
 #include <stdio.h>
@@ -26,10 +28,14 @@
 #include "power_save.h"
 #include "wifi_manager.h"
 #include "sleep_timer.h"
+#include "navidrome.h"
+#include "app_mutex.h"
+#include "recorder.h"
 
 /* Variables globales 3D stéréoscopique */
 float g_3d_iod = 0.f;
 int   g_3d_eye = 0;
+extern void audio_viz_frame_begin(void); /* CLOT9e */
 int   g_update_notif_timer = 0;
 bool  g_is_new3ds = false; /* détecté une fois au démarrage */
 u8    s_startup_brightness = 5; /* V0.97 : luminosite au demarrage app */
@@ -86,13 +92,16 @@ static void touch_arrow_reset(void)
     s_touch_arrow_down = false;
     s_touch_arrow_rep  = false;
 }
+static void check_alarm_trigger(void);
 static void nav_go_up(void);
 
 /* ── Global state ─────────────────────────────────────────── */
+static u64 s_init_start_time = 0;  /* Timer pour detecter blocage init */
 static volatile bool g_loading        = false;
 static char          g_load_path[512] = {0};
-static AppState    g_state        = STATE_FILE_BROWSER;
+AppState    g_state        = STATE_FILE_BROWSER;
 static FileBrowser g_browser;
+static FileBrowser g_picker_fb;
 static Playlist    g_playlist;
 static PlayerUI    g_player_ui;
 static InputState  g_input;
@@ -101,9 +110,9 @@ static int         g_eq_band      = 0;
 static volatile bool g_init_done  = false;
 
 /* ── Render targets ───────────────────────────────────────── */
-static C3D_RenderTarget *g_top       = NULL;
-static C3D_RenderTarget *g_top_right = NULL;
-static C3D_RenderTarget *g_bot = NULL;
+C3D_RenderTarget *g_top       = NULL;
+C3D_RenderTarget *g_top_right = NULL;
+C3D_RenderTarget *g_bot = NULL;
 
 /* ── Debug log ────────────────────────────────────────────── */
 static void dbg(const char *msg) { (void)msg; }
@@ -131,9 +140,23 @@ static void load_thread_func(void *arg)
     g_loading = false;
 }
 
-static void load_and_play(const char *path)
+void main_restore_local_music(void)
+{
+    if (g_settings.last_path[0]) {
+        audio_load(g_settings.last_path);
+        audio_pause(); /* Garder en pause */
+        player_ui_load_cover(&g_player_ui, audio_get_metadata());
+    } else {
+        player_ui_load_cover(&g_player_ui, NULL);
+    }
+}
+
+void load_and_play(const char *path)
 {
     if (g_loading) return; /* deja en chargement */
+    app_mutex_claim(APP_OWNER_LOCAL_PLAYER); /* coupe Navidrome ET le magnetophone si actifs */
+    nd_clear_playing(); /* une piste locale prend la main sur la lecture ND */
+    audio_set_network_source(false);  /* EQ/SoundTouch redeviennent disponibles */
     strncpy(g_load_path, path, 511);
     g_loading = true;
     g_state   = STATE_PLAYER;
@@ -169,8 +192,8 @@ static void play_current_track(void)
 
 /* ── Touch seek ───────────────────────────────────────────── */
 /* Position tactile mémorisée pendant le glissement */
-static bool  s_touch_seeking = false;
-static float s_touch_seek_pct = 0.f;
+bool  s_touch_seeking = false;
+float s_touch_seek_pct = 0.f;
 
 static void handle_touch_seek(void)
 {
@@ -352,11 +375,35 @@ static void input_player(void)
     if ((kd & KEY_R) && (held & KEY_L)) { audio_toggle_pause(); return; }
 
     if (kd & KEY_LEFT) {
-        RepeatMode saved = g_playlist.repeat;
-        if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
-        int n = pl_prev(&g_playlist);
-        g_playlist.repeat = saved;
-        if (n >= 0) play_current_track();
+        int threshold = 0;
+
+        if (g_settings.prev_seek_threshold == 1) threshold = 2;
+
+        else if (g_settings.prev_seek_threshold == 2) threshold = 5;
+
+        else if (g_settings.prev_seek_threshold == 3) threshold = 10;
+
+        extern int audio_get_position(void);
+
+        if (threshold > 0 && audio_get_position() >= threshold) {
+
+            extern void audio_seek(int seconds);
+
+            audio_seek(0);
+
+        } else {
+
+            RepeatMode saved = g_playlist.repeat;
+
+            if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
+
+            int n = pl_prev(&g_playlist);
+
+            g_playlist.repeat = saved;
+
+            if (n >= 0) play_current_track();
+
+        }
     }
     if (kd & KEY_RIGHT) {
         RepeatMode saved = g_playlist.repeat;
@@ -368,11 +415,20 @@ static void input_player(void)
     }
 
     /* Volume */
-    if (held & KEY_UP) {
-        float v = audio_get_volume() + 0.02f;
-        if (v > 1.f) v = 1.f;
-        audio_set_volume(v);
-        g_settings.volume = v;
+    {   /* VOLBOOST3 : butee 100% ; si deja a 100% au moment de
+           l'appui => monte jusqu'a 300% ; descente libre */
+        static bool s_up_held = false, s_boost_arm = false;
+        if (held & KEY_UP) {
+            if (!s_up_held) s_boost_arm = (audio_get_volume() >= 0.999f);
+            s_up_held = true;
+            float cap = s_boost_arm ? 3.0f : 1.0f;
+            float v = audio_get_volume() + 0.02f;
+            if (v > cap) v = cap;
+            audio_set_volume(v);
+            g_settings.volume = v;
+        } else {
+            s_up_held = false;
+        }
     }
     if (held & KEY_DOWN) {
         float v = audio_get_volume() - 0.02f;
@@ -408,11 +464,35 @@ static void input_player(void)
         int ty = g_input.touch.py;
 
         if (tx >= 14 && tx <= 94 && ty >= 36 && ty <= 56) {
-            RepeatMode saved = g_playlist.repeat;
-            if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
-            int n = pl_prev(&g_playlist);
-            g_playlist.repeat = saved;
-            if (n >= 0) play_current_track();
+            int threshold = 0;
+
+            if (g_settings.prev_seek_threshold == 1) threshold = 2;
+
+            else if (g_settings.prev_seek_threshold == 2) threshold = 5;
+
+            else if (g_settings.prev_seek_threshold == 3) threshold = 10;
+
+            extern int audio_get_position(void);
+
+            if (threshold > 0 && audio_get_position() >= threshold) {
+
+                extern void audio_seek(int seconds);
+
+                audio_seek(0);
+
+            } else {
+
+                RepeatMode saved = g_playlist.repeat;
+
+                if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
+
+                int n = pl_prev(&g_playlist);
+
+                g_playlist.repeat = saved;
+
+                if (n >= 0) play_current_track();
+
+            }
         }
         else if (tx >= 110 && tx <= 190 && ty >= 36 && ty <= 56) {
             audio_toggle_pause();
@@ -502,15 +582,63 @@ static void input_playlist(void)
         }
     }
 
-    if (kd & KEY_DOWN && g_playlist.selected < g_playlist.count - 1) {
+
+    /* S7-NAV: Gauche/Droite = saut de 5 elements */
+    if (kd & KEY_LEFT) {
+        g_playlist.selected -= 5;
+        if (g_playlist.selected < 0) g_playlist.selected = 0;
+        if (g_playlist.selected < g_playlist.scroll_offset)
+            g_playlist.scroll_offset = g_playlist.selected;
+    }
+    if (kd & KEY_RIGHT) {
+        g_playlist.selected += 5;
+        if (g_playlist.selected >= g_playlist.count) g_playlist.selected = g_playlist.count - 1;
+        if (g_playlist.selected >= g_playlist.scroll_offset + vis)
+            g_playlist.scroll_offset = g_playlist.selected - vis + 1;
+    }
+
+    /* S7-NAV: Auto-repeat Haut/Bas maintenu (400ms puis 80ms) */
+    {
+        static u64 s_pl_held_t = 0;
+        static bool s_pl_rep = false;
+        u32 held = hidKeysHeld();
+        u64 now = osGetTime();
+        bool want_up = (held & KEY_UP) != 0;
+        bool want_dn = (held & KEY_DOWN) != 0;
+        if (want_up || want_dn) {
+            if (!s_pl_rep) {
+                if (now - s_pl_held_t >= 400) { s_pl_rep = true; s_pl_held_t = now; }
+                else { want_up = want_dn = false; }
+            } else {
+                if (now - s_pl_held_t >= 80) { s_pl_held_t = now; }
+                else { want_up = want_dn = false; }
+            }
+        } else { s_pl_rep = false; s_pl_held_t = now; }
+
+        if ((kd & KEY_DOWN || want_dn) && g_playlist.selected < g_playlist.count - 1) {
         g_playlist.selected++;
         if (g_playlist.selected >= g_playlist.scroll_offset + vis)
             g_playlist.scroll_offset++;
     }
-    if (kd & KEY_UP && g_playlist.selected > 0) {
+    if ((kd & KEY_UP || want_up) && g_playlist.selected > 0) {
         g_playlist.selected--;
         if (g_playlist.selected < g_playlist.scroll_offset)
             g_playlist.scroll_offset--;
+    } /* fin bloc auto-repeat */
+    }
+
+    /* S7-NAV: Gauche/Droite = saut de 5 elements */
+    if (kd & KEY_LEFT) {
+        g_playlist.selected -= 5;
+        if (g_playlist.selected < 0) g_playlist.selected = 0;
+        if (g_playlist.selected < g_playlist.scroll_offset)
+            g_playlist.scroll_offset = g_playlist.selected;
+    }
+    if (kd & KEY_RIGHT) {
+        g_playlist.selected += 5;
+        if (g_playlist.selected >= g_playlist.count) g_playlist.selected = g_playlist.count - 1;
+        if (g_playlist.selected >= g_playlist.scroll_offset + vis)
+            g_playlist.scroll_offset = g_playlist.selected - vis + 1;
     }
 
     if (kd & KEY_A) {
@@ -524,11 +652,15 @@ static void input_playlist(void)
     if (kd & KEY_START)  g_state = STATE_PLAYER;
 
     if ((kd & KEY_L) && (held & KEY_R)) audio_toggle_pause();
-    if ((kd & KEY_R) && (held & KEY_L)) audio_toggle_pause();
-
-    if (audio_is_finished()) {
-        if (pl_next(&g_playlist) >= 0) play_current_track();
+    if (kd & KEY_L) {
+        const char *cur_path = g_settings.last_path;
+        if (cur_path && cur_path[0]) {
+            extern const AudioMetadata* audio_get_metadata(void);
+            const AudioMetadata *m = audio_get_metadata();
+            fav_toggle(cur_path, m->title[0] ? m->title : "Morceau");
+        }
     }
+    if ((kd & KEY_R) && (held & KEY_L)) audio_toggle_pause();
 }
 
 /* ── Input: Settings ──────────────────────────────────────── */
@@ -540,9 +672,12 @@ static void input_settings(void)
     if (g_input.down & KEY_START)  g_state = STATE_PLAYER;
     if (g_input.down & KEY_SELECT) g_state = STATE_FILE_BROWSER;
     if (g_input.down & KEY_L)      g_state = STATE_EQUALIZER;
-    /* V0.96 : force save quand on quitte settings pour eviter perte */
+    /* V0.96 : force save quand on quitte settings pour eviter perte.
+       settings_save_sync() est bloquant (attente + ~30 ecritures SD inline) :
+       appele depuis la boucle de rendu, il gelait l'appli a chaque sortie de
+       Settings. settings_save() fait la meme chose sur un thread detache. */
     if (old_state == STATE_SETTINGS && g_state != STATE_SETTINGS) {
-        settings_save_sync();
+        settings_save();
     }
 }
 
@@ -571,14 +706,28 @@ static void draw_frame(float dt)
     const AudioMetadata *meta = audio_get_metadata();
 
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    audio_viz_frame_begin(); /* CLOT9f : debut d image = droit a un tick */
 
     /* Ecran de chargement si init pas terminee */
     if (!g_init_done) {
+        /* Demarrer le timer au 1er affichage */
+        if (s_init_start_time == 0) s_init_start_time = osGetTime();
+        u64 elapsed_ms = osGetTime() - s_init_start_time;
+        bool show_help = (elapsed_ms >= 10000);
+
+        /* Detection SELECT pour reboot si aide affichee */
+        if (show_help) {
+            hidScanInput();
+            if (hidKeysDown() & KEY_SELECT) {
+                APT_HardwareResetAsync();
+            }
+        }
+
         /* Fond theme normal (init n a jamais lieu en mode eco) */
         C2D_TargetClear(g_top, current_theme->bg_primary);
         C2D_SceneBegin(g_top);
         static C2D_TextBuf load_tb = NULL;
-        if (!load_tb) load_tb = C2D_TextBufNew(64);
+        if (!load_tb) load_tb = C2D_TextBufNew(512);
         C2D_TextBufClear(load_tb);
         C2D_Text tx;
         C2D_TextParse(&tx, load_tb, "Chargement...");
@@ -586,11 +735,48 @@ static void draw_frame(float dt)
         C2D_DrawText(&tx, C2D_AlignCenter|C2D_WithColor,
             200, 110, 0, 0.6f, 0.6f, current_theme->text_accent);
 
+        /* Message d aide apres 10 sec */
+        if (show_help) {
+            u32 help_col = current_theme->text_accent;
+            u32 box_bg   = C2D_Color32(0, 0, 0, 180);
+            u32 box_br   = help_col;
+
+            float bx = 20, by = 150, bw = TOP_WIDTH - 40, bh = 70;
+            C2D_DrawRectSolid(bx, by, 0, bw, bh, box_bg);
+            C2D_DrawRectSolid(bx, by, 0, bw, 1, box_br);
+            C2D_DrawRectSolid(bx, by + bh - 1, 0, bw, 1, box_br);
+            C2D_DrawRectSolid(bx, by, 0, 1, bh, box_br);
+            C2D_DrawRectSolid(bx + bw - 1, by, 0, 1, bh, box_br);
+
+            const char *l1_fr = "Si vous restez bloque,";
+            const char *l2_fr = "tentez de redemarrer la console.";
+            const char *l3_fr = "Appuyez sur SELECT pour redemarrer.";
+            const char *l1_en = "If you are stuck,";
+            const char *l2_en = "try restarting the console.";
+            const char *l3_en = "Press SELECT to restart.";
+            const char *l1 = (g_settings.language == 1) ? l1_en : l1_fr;
+            const char *l2 = (g_settings.language == 1) ? l2_en : l2_fr;
+            const char *l3 = (g_settings.language == 1) ? l3_en : l3_fr;
+
+            C2D_Text t1, t2, t3;
+            C2D_TextParse(&t1, load_tb, l1);
+            C2D_TextParse(&t2, load_tb, l2);
+            C2D_TextParse(&t3, load_tb, l3);
+            C2D_TextOptimize(&t1);
+            C2D_TextOptimize(&t2);
+            C2D_TextOptimize(&t3);
+            C2D_DrawText(&t1, C2D_AlignCenter|C2D_WithColor, 200, by + 8,  0, 0.44f, 0.44f, help_col);
+            C2D_DrawText(&t2, C2D_AlignCenter|C2D_WithColor, 200, by + 26, 0, 0.44f, 0.44f, help_col);
+            C2D_DrawText(&t3, C2D_AlignCenter|C2D_WithColor, 200, by + 50, 0, 0.42f, 0.42f, help_col);
+        }
+
         C2D_TargetClear(g_bot, current_theme->bg_primary);
         C2D_SceneBegin(g_bot);
         C3D_FrameEnd(0);
         return;
     }
+    /* Init terminee : reset le timer pour prochaine fois */
+    s_init_start_time = 0;
 
     float iod = osGet3DSliderState() * 6.f;
 
@@ -626,7 +812,11 @@ static void draw_frame(float dt)
             case STATE_PLAYER:       player_ui_draw_top(&g_player_ui, meta, &g_playlist); break;
             case STATE_PLAYLIST:     pl_draw_top(&g_playlist);                            break;
             case STATE_SETTINGS:     settings_draw_top();                                 break;
+            case STATE_DIR_PICKER:   dir_picker_draw_top();                              break;
+            case STATE_NIGHT_MODE:   night_mode_draw();                                   break;
             case STATE_EQUALIZER:    eq_draw_top(g_eq_band);                              break;
+            case STATE_NAVIDROME:   navidrome_draw_top();                             break;
+            case STATE_RECORDER:    recorder_draw_top();                                 break;  /* ND1 */
         }
     }
 
@@ -652,19 +842,24 @@ static void draw_frame(float dt)
             }
         } else if (power_save_is_active()) {
             power_save_draw_top(meta);
-        } else if (!g_loading) {
-            g_3d_eye = 1; /* oeil droit */
+        } else {
+            g_3d_eye = 1; /* oeil droit (affiche toujours la page) */
             switch (g_state) {
                 case STATE_FILE_BROWSER: fb_draw_top(&g_browser);                             break;
                 case STATE_PLAYER:       player_ui_draw_top(&g_player_ui, meta, &g_playlist); break;
                 case STATE_PLAYLIST:     pl_draw_top(&g_playlist);                            break;
                 case STATE_SETTINGS:     settings_draw_top();                                 break;
+            case STATE_DIR_PICKER:   dir_picker_draw_top();                              break;
+            case STATE_NIGHT_MODE:   night_mode_draw();                                   break;
                 case STATE_EQUALIZER:    eq_draw_top(g_eq_band);                              break;
+                case STATE_NAVIDROME:   navidrome_draw_top();                             break;
+            case STATE_RECORDER:    recorder_draw_top();                                 break;  /* ND1 */
             }
         }
     }
 
     /* Bottom screen */
+    g_3d_eye = 0; /* CLOT9g : la passe du bas est le deuxieme droit au tick */
     C2D_TargetClear(g_bot, current_theme->bg_primary);
     C2D_SceneBegin(g_bot);
     if (power_save_is_active()) {
@@ -676,7 +871,15 @@ static void draw_frame(float dt)
         case STATE_PLAYER:       player_ui_draw_bottom(&g_player_ui, meta, &g_playlist); break;
         case STATE_PLAYLIST:     pl_draw_bottom(&g_playlist);                          break;
         case STATE_SETTINGS:     settings_draw_bottom(&g_settings_sel);               break;
+        case STATE_DIR_PICKER:   fb_draw_bottom(&g_picker_fb);                         break;
+        case STATE_NIGHT_MODE:   night_mode_draw();                                   break;
         case STATE_EQUALIZER:    eq_draw_bottom(g_eq_band);                           break;
+        case STATE_NAVIDROME:   navidrome_draw_bottom();   break;
+        case STATE_RECORDER:    recorder_draw_bottom();                          break;  /* ND1 */
+        }
+        extern void ddlc_draw_monika_stalker(void);
+        if (g_state != STATE_PLAYER && g_state != STATE_NIGHT_MODE) {
+            ddlc_draw_monika_stalker();
     }
     }
 
@@ -872,35 +1075,12 @@ static void draw_splash_screen(void)
                 C2D_Color32(particles[i].r, particles[i].g, particles[i].b, pa));
         }
 
-        /* Barres EQ AUTOUR du texte (en bas) */
-        float bar_area_y = 145;
-        float bar_area_h = 60;
-        float bar_w      = 13.f;
-        float bar_gap    = 3.f;
-        float total_w    = NUM_BARS * (bar_w + bar_gap) - bar_gap;
-        float start_x    = (TOP_WIDTH - total_w) / 2.f;
-
-        for (int i = 0; i < NUM_BARS; i++) {
-            float bx = start_x + i * (bar_w + bar_gap);
-            float bh = bar_heights[i] * bar_area_h;
-            float by = bar_area_y + bar_area_h - bh;
-
-            u32 col = th->visualizer_bars[i * 8 / NUM_BARS];
-            u8 r = (col >> 0)  & 0xff;
-            u8 g = (col >> 8)  & 0xff;
-            u8 b = (col >> 16) & 0xff;
-            u8 a = (u8)(220 * fadeout);
-
-            C2D_DrawRectSolid(bx, by, 0, bar_w, bh, C2D_Color32(r, g, b, a));
-
-            /* Glow en haut de barre */
-            C2D_DrawRectSolid(bx - 1, by - 2, 0, bar_w + 2, 4,
-                C2D_Color32(r, g, b, (u8)(80 * fadeout)));
-
-            /* Reflet sol */
-            C2D_DrawRectSolid(bx, bar_area_y + bar_area_h, 0,
-                bar_w, bh * 0.25f, C2D_Color32(r, g, b, (u8)(60 * fadeout)));
-        }
+        /* APPEL DU VRAI VISUALISEUR DU THÈME DANS LE SPLASH */
+        float splash_vw = 260.f; /* Taille reduite elegante pour l'ecran de demarrage */
+        float splash_vh = 42.f;
+        float splash_vx = (TOP_WIDTH - splash_vw) / 2.f;
+        float splash_vy = 152.f;
+        player_ui_draw_splash_viz(g_settings.viz_style, splash_vx, splash_vy, splash_vw, splash_vh, eq_alpha * fadeout, frame);
 
         /* LOGO "3DSOUNDSHELL" - GROS, CENTRE, BLANC sur NOIR
            Position fixe pour continuite avec le BCMA */
@@ -976,6 +1156,7 @@ static void apt_hook_callback(APT_HookType hook, void* param)
     switch (hook) {
         case APTHOOK_ONSUSPEND:
         case APTHOOK_ONSLEEP:
+            { extern void recorder_pause_for_sleep(void); recorder_pause_for_sleep(); }
             /* V0.96 : avant HOME/veille → forcer restauration ecran
                pour ne pas laisser le systeme geler avec un ecran off custom */
             power_save_force_restore();
@@ -986,15 +1167,21 @@ static void apt_hook_callback(APT_HookType hook, void* param)
             wifi_manager_enable();
             break;
         case APTHOOK_ONWAKEUP:
+            { extern void recorder_resume_from_sleep(void); recorder_resume_from_sleep(); }
         case APTHOOK_ONRESTORE:
             /* Console reouverte ou retour depuis HOME */
+            /* REVEIL1 : au reveil, le volume retourne a 100% */
+            audio_set_volume(1.0f);
+            g_settings.volume = 1.0f;
+            settings_mark_dirty();
             s_force_led_refresh = true;
             /* V0.97 : resync lum systeme (user peut l avoir change en HOME) */
             power_save_sync_brightness();
             /* V0.96 : ré-appliquer le mode eco si actif */
             power_save_refresh();
-            /* V0.96 : recouper le wifi si option ON */
-            if (g_settings.wifi_off_in_app) wifi_manager_disable();
+            /* V0.96 : recouper le wifi si option ON (sauf si on est sur Navidrome !) */
+            extern bool nd_session_active(void);
+            if (g_settings.wifi_off_in_app && !nd_session_active()) wifi_manager_disable();
             break;
 
         case APTHOOK_ONEXIT:
@@ -1126,6 +1313,25 @@ static void update_led(void)
 /* Prototypes externes */
 extern void ping_stats_start(void);
 
+
+static void clean_temp_dir(void) {
+    remove("sdmc:/3DSoundShell/Temp/nd_play.mp3");
+    remove("sdmc:/3DSoundShell/Temp/cover_temp.png");
+    remove("sdmc:/3DSoundShell/Temp/cover_temp.jpg");
+
+    DIR *d = opendir("sdmc:/3DSoundShell/Temp/pochettes");
+    if (d) {
+        struct dirent *dir;
+        while ((dir = readdir(d)) != NULL) {
+            if (dir->d_name[0] == '.') continue;
+            char p[256];
+            snprintf(p, sizeof(p), "sdmc:/3DSoundShell/Temp/pochettes/%s", dir->d_name);
+            remove(p);
+        }
+        closedir(d);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -1136,6 +1342,9 @@ int main(int argc, char *argv[])
 
     /* Créer le dossier debug AVANT tout */
     mkdir("sdmc:/3DSoundShell", 0777);
+    mkdir("sdmc:/3DSoundShell/Temp", 0777);
+    mkdir("sdmc:/3DSoundShell/Temp/pochettes", 0777);
+    clean_temp_dir();
     mkdir("sdmc:/Music",        0777);
 
     /* Vider / créer le log */
@@ -1158,6 +1367,100 @@ int main(int argc, char *argv[])
         C2D_Fini(); C3D_Fini(); gfxExit(); romfsExit(); return 1;
     }
 
+    /* =========================================================================
+       3DSS-FIX: MODE SANS ECHEC INTERACTIF - Touche SELECT au demarrage
+       ========================================================================= */
+    hidScanInput();
+    if (hidKeysHeld() & KEY_SELECT) {
+        bool do_reset = false;
+        
+        C2D_TextBuf safe_tb = C2D_TextBufNew(512);
+        C2D_Text txt_title, txt_question, txt_yes, txt_no;
+        C2D_TextParse(&txt_title, safe_tb, "[ MODE SANS ECHEC ]");
+        C2D_TextParse(&txt_question, safe_tb, "Reinitialiser l'application ?");
+        C2D_TextParse(&txt_yes, safe_tb, "A : OUI (Effacer cache & parametres)");
+        C2D_TextParse(&txt_no, safe_tb, "B : NON (Lancer normalement)");
+        
+        C2D_TextOptimize(&txt_title);
+        C2D_TextOptimize(&txt_question);
+        C2D_TextOptimize(&txt_yes);
+        C2D_TextOptimize(&txt_no);
+
+        /* Boucle d attente du choix utilisateur */
+        while (aptMainLoop()) {
+        /* Tick de relance automatique Navidrome universel à 60 FPS (Zéro délai) */
+        extern void nd_pending_play_tick(void);
+        nd_pending_play_tick();
+
+            hidScanInput();
+            u32 kDown = hidKeysDown();
+        if (power_save_is_active() || power_save_should_suppress_b()) kDown &= ~KEY_B;
+
+            if (kDown & KEY_A) { do_reset = true; break; }
+            if (kDown & KEY_B) { do_reset = false; break; }
+
+            /* Rendu 3D/2D securise avec FrameBegin / FrameEnd */
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+
+            /* Ecran du haut (Alerte sombre) */
+            C2D_TargetClear(g_top, C2D_Color32(40, 20, 20, 255));
+            C2D_SceneBegin(g_top);
+            C2D_DrawText(&txt_title, C2D_WithColor, 100, 40, 0.5f, 0.7f, 0.7f, C2D_Color32(255, 80, 80, 255));
+            C2D_DrawText(&txt_question, C2D_WithColor, 60, 110, 0.5f, 0.55f, 0.55f, C2D_Color32(255, 255, 255, 255));
+
+            /* Ecran du bas (Choix A / B) */
+            C2D_TargetClear(g_bot, C2D_Color32(20, 20, 30, 255));
+            C2D_SceneBegin(g_bot);
+            C2D_DrawRectSolid(30, 50, 0, 260, 50, C2D_Color32(120, 30, 30, 255));
+            C2D_DrawText(&txt_yes, C2D_WithColor, 40, 65, 0.5f, 0.45f, 0.45f, C2D_Color32(255, 255, 255, 255));
+
+            C2D_DrawRectSolid(30, 130, 0, 260, 50, C2D_Color32(30, 120, 30, 255));
+            C2D_DrawText(&txt_no, C2D_WithColor, 40, 145, 0.5f, 0.45f, 0.45f, C2D_Color32(255, 255, 255, 255));
+
+            C3D_FrameEnd(0);
+        }
+
+        C2D_TextBufDelete(safe_tb);
+
+        /* Execution du reset uniquement si l utilisateur a appuyé sur A */
+        if (do_reset) {
+            remove("sdmc:/3DSoundShell/settings.ini");
+            remove("sdmc:/3DSoundShell/theme.ini");
+            remove("sdmc:/3DSoundShell/favorites.txt");
+            remove("sdmc:/3DSoundShell/nd_favorites.dat");
+            remove("sdmc:/3DSoundShell/version.txt");
+            remove("sdmc:/3DSoundShell/soundshell_perf.txt");
+            remove("sdmc:/3DSoundShell/debug.log");
+            remove("sdmc:/3DSoundShell/screen_debug.log");
+            remove("sdmc:/3DSoundShell/perf_v2.log");
+            remove("sdmc:/3DSoundShell/update_debug.log");
+            remove("sdmc:/3DSoundShell/shutdown_debug.log");
+            remove("sdmc:/3DSoundShell/ping_v10.log");
+            remove("sdmc:/3DSoundShell/lum_cfgu_725029.log");
+            remove("sdmc:/3DSoundShell/Temp/nd_play.mp3");
+
+            /* Vider le cache des pochettes */
+            DIR *d = opendir("sdmc:/3DSoundShell/Temp/pochettes");
+            if (d) {
+                struct dirent *dir;
+                while ((dir = readdir(d)) != NULL) {
+                    char p[256];
+                    snprintf(p, sizeof(p), "sdmc:/3DSoundShell/Temp/pochettes/%s", dir->d_name);
+                    remove(p);
+                }
+                closedir(d);
+            }
+
+            /* Quitte proprement vers le menu HOME de la 3DS */
+            C2D_Fini();
+            C3D_Fini();
+            gfxExit();
+            romfsExit();
+            return 0;
+        }
+    }
+    /* ========================================================================= */
+
     /* ── 4. Services optionnels ───────────────────────────── */
     cfguInit();
     ptmuInit();
@@ -1167,10 +1470,7 @@ int main(int argc, char *argv[])
     {
         u8 lum = 0;
         Result r = CFGU_GetConfigInfoBlk2(1, 0x00050001, &lum);
-        char fname[128];
-        snprintf(fname, 128, "sdmc:/3DSoundShell/lum_cfgu_%llu.log", (unsigned long long)(osGetTime() % 1000000));
-        FILE *ff = fopen(fname, "w");
-        if (ff) { fprintf(ff, "rc=%08lX val=%d", r, lum); fclose(ff); }
+
         if (R_SUCCEEDED(r) && lum >= 1 && lum <= 5) s_startup_brightness = lum;
         else s_startup_brightness = 5;
     }
@@ -1184,7 +1484,7 @@ int main(int argc, char *argv[])
     /* V0.97 : Sur New 3DS, liberer les cores caches (30% -> 80% CPU dispo)
        Necessaire pour le WSOLA en temps reel */
     if (g_is_new3ds) {
-        APT_SetAppCpuTimeLimit(80);
+        APT_SetAppCpuTimeLimit(g_is_new3ds ? 80 : 30); /* CLOT10g : le Old a 2 coeurs, la quote lui sert aussi */
     }
 
     /* ── 5. Thème & settings ──────────────────────────────── */
@@ -1207,9 +1507,18 @@ int main(int argc, char *argv[])
     if (g_settings.playback_speed > 0.01f)
         audio_set_speed(g_settings.playback_speed);
 
-    /* EQ */
-    for (int i = 0; i < EQ_BANDS; i++)
-        audio_eq_set_gain(i, g_settings.eq_gains[i]);
+    /* EQ : les reglages utilisateur sont ecrits dans eq_gains_per_preset[]
+       (equalizer.c), pas dans le vieux tableau plat eq_gains[] - celui-ci
+       n est plus mis a jour que par les presets d usine au demarrage. Lire
+       eq_gains[] ici rechargeait donc les valeurs par defaut/perimees a
+       chaque lancement au lieu des reglages EQ personnalises de l utilisateur
+       (bien sauvegardes sur la carte SD, juste jamais relus). */
+    {
+        int pi = g_settings.eq_preset_index;
+        if (pi < 0 || pi > 6) pi = 0;
+        for (int i = 0; i < EQ_BANDS; i++)
+            audio_eq_set_gain(i, g_settings.eq_gains_per_preset[pi][i]);
+    }
 
     /* V0.95 : Preview metadonnees asynchrone */
     preview_init();
@@ -1236,7 +1545,7 @@ int main(int argc, char *argv[])
     memset(&g_browser, 0, sizeof(g_browser));
     g_browser.visible_rows = 9;
     strncpy(g_browser.cwd,
-        g_settings.start_dir[0] ? g_settings.start_dir : "sdmc:/Music",
+        main_get_start_dir(),
         MAX_PATH-1);
 
     /* Restaurer viz_style sauvegardé */
@@ -1248,7 +1557,7 @@ int main(int argc, char *argv[])
     /* ── 8. Thread d init SD (scan en arriere-plan) ─────── */
     static char s_init_path[512];
     strncpy(s_init_path,
-        g_settings.start_dir[0] ? g_settings.start_dir : "sdmc:/Music",
+        main_get_start_dir(),
         511);
 
     threadCreate(init_thread_func, s_init_path, 32*1024, 0x30, -1, true);
@@ -1259,6 +1568,90 @@ int main(int argc, char *argv[])
     bool resumed     = false;
 
     while (aptMainLoop()) {
+        extern void audio_update_wobble(void); audio_update_wobble();
+        extern void audio_update_fade(void); audio_update_fade();
+        /* Tick de relance automatique Navidrome universel à 60 FPS (Zéro délai) */
+        extern void nd_pending_play_tick(void);
+        nd_pending_play_tick();
+        /* --- 3DSS: Maintien du flux micro a 60 FPS pendant l enregistrement --- */
+        if (g_state == STATE_RECORDER) {
+            extern void recorder_update(void);
+            recorder_update();
+        }
+        /* Gestion dynamique temps-reel du Bruit Blanc & detection Jack.
+           Etait avant dans input_playlist() : ne tournait donc QUE sur
+           l ecran Playlist, quasiment jamais visite en usage normal (la
+           lecture se passe sur l ecran Player) - la fonctionnalite "anti-
+           veille Bluetooth" ne se declenchait donc pour ainsi dire jamais.
+           Deplace ici : tourne a chaque image, quel que soit l ecran. */
+        if (g_settings.white_noise_keepalive && (audio_is_finished() || audio_get_state() == AUDIO_PAUSED || !nd_get_playing())) {
+            bool hp = false;
+            if (R_SUCCEEDED(DSP_GetHeadphoneStatus(&hp)) && hp) {
+                if (!audio_is_white_noise_active()) {
+                    audio_start_white_noise();
+                } else {
+                    extern void audio_update_white_noise_volume(void);
+                    audio_update_white_noise_volume();
+                }
+            } else {
+                if (audio_is_white_noise_active()) {
+                    audio_stop_white_noise();
+                }
+            }
+        } else {
+            if (audio_is_white_noise_active()) {
+                audio_stop_white_noise();
+            }
+        }
+        /* ── GESTION LECTURE CLAPET FERMÉ ───────────────────────── */
+        if (g_settings.lid_playback_enabled) {
+            u8 shell_open = 1;
+            PTMU_GetShellState(&shell_open);
+            static bool s_lid_was_closed = false;
+
+            if (!shell_open) {
+                if (!s_lid_was_closed) {
+                    /* On accompagne l'extinction matérielle pour économiser le GPU */
+                    GSPLCD_SetBrightness(GSPLCD_SCREEN_TOP, 1);
+                    GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTTOM);
+                    s_lid_was_closed = true;
+                }
+                svcSleepThread(50000000ULL); /* Sommeil 50ms (Economie batterie) */
+            } else if (s_lid_was_closed) {
+                GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTTOM);
+                extern u8 s_startup_brightness;
+                GSPLCD_SetBrightness(GSPLCD_SCREEN_TOP, s_startup_brightness > 0 ? s_startup_brightness : 5);
+                /* REVEIL1B : ouverture clapet = reveil (pas de veille
+                   systeme quand l'option lecture clapet est active,
+                   donc les hooks APT ne tirent pas ici) -> volume 100% */
+                audio_set_volume(1.0f);
+                g_settings.volume = 1.0f;
+                settings_mark_dirty();
+                s_lid_was_closed = false;
+            }
+        }
+
+        /* -- REVEIL2 : clapet ferme + option lecture clapet + pas de
+             casque => pause audio jusqu'a casque branche ou clapet
+             ouvert. Erreur de lecture jack = considere branche. -- */
+        if (g_settings.lid_playback_enabled) {
+            u8 sh = 1;
+            PTMU_GetShellState(&sh);
+            bool hp = true;
+            if (R_FAILED(DSP_GetHeadphoneStatus(&hp))) hp = true;
+            static bool s_jack_paused = false;
+            if (!sh && !hp) {
+                if (!s_jack_paused && audio_get_state() == AUDIO_PLAYING) {
+                    audio_pause();
+                    s_jack_paused = true;
+                }
+            } else if (s_jack_paused) {
+                if (audio_get_state() == AUDIO_PAUSED) audio_play();
+                s_jack_paused = false;
+            }
+        }
+
+        check_alarm_trigger();
         u64   now = osGetTime();
         float dt  = (now - last_time) / 1000.f;
         last_time = now;
@@ -1279,11 +1672,35 @@ int main(int argc, char *argv[])
 
             /* Fleche gauche/droite = changer de piste */
             if (g_input.down & KEY_LEFT) {
-                RepeatMode saved = g_playlist.repeat;
-                if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
-                int n = pl_prev(&g_playlist);
-                g_playlist.repeat = saved;
-                if (n >= 0) play_current_track();
+                int threshold = 0;
+
+                if (g_settings.prev_seek_threshold == 1) threshold = 2;
+
+                else if (g_settings.prev_seek_threshold == 2) threshold = 5;
+
+                else if (g_settings.prev_seek_threshold == 3) threshold = 10;
+
+                extern int audio_get_position(void);
+
+                if (threshold > 0 && audio_get_position() >= threshold) {
+
+                    extern void audio_seek(int seconds);
+
+                    audio_seek(0);
+
+                } else {
+
+                    RepeatMode saved = g_playlist.repeat;
+
+                    if (saved == REPEAT_ONE) g_playlist.repeat = REPEAT_ALL;
+
+                    int n = pl_prev(&g_playlist);
+
+                    g_playlist.repeat = saved;
+
+                    if (n >= 0) play_current_track();
+
+                }
             }
             if (g_input.down & KEY_RIGHT) {
                 RepeatMode saved = g_playlist.repeat;
@@ -1337,13 +1754,20 @@ int main(int argc, char *argv[])
         }
 
         /* Bloquer inputs pendant chargement */
-        if (!g_loading && !g_browser_loading) {
+        /* Autoriser les touches pendant le chargement Navidrome pour pouvoir faire "Suivant" (Skip) */
+        extern int nd_get_playing(void);
+        extern bool nd_session_active(void);
+        if ((!g_loading && !g_browser_loading) || nd_get_playing() || nd_session_active()) {
             switch (g_state) {
                 case STATE_FILE_BROWSER: input_file_browser(); break;
                 case STATE_PLAYER:       input_player();       break;
                 case STATE_PLAYLIST:     input_playlist();     break;
                 case STATE_SETTINGS:     input_settings();     break;
+                case STATE_DIR_PICKER:   input_dir_picker();   break;
+                case STATE_NIGHT_MODE:   input_night_mode();   break;
                 case STATE_EQUALIZER:    input_equalizer();    break;
+                case STATE_NAVIDROME:   navidrome_input(&g_state);   break;
+            case STATE_RECORDER:    recorder_input((int*)&g_state); break;  /* ND1 */
             }
         }
 
@@ -1373,22 +1797,25 @@ int main(int argc, char *argv[])
         update_led();
 
         /* V0.97 : Auto-avance GLOBALE - marche dans toutes les pages
-           FIX : ne pas declencher pendant chargement (etat transitoire finished) */
-        if (audio_is_finished() && !g_loading) {
+           FIX : ne pas declencher pendant chargement (etat transitoire finished)
+           FIX : ni pendant une lecture Navidrome. Un titre ND n est pas dans
+           g_playlist ; sans ce garde, la fin (ou meme les audio_stop()
+           transitoires) d un titre ND faisait croire qu une piste locale venait
+           de finir, et pl_next() lancait un morceau au hasard de la carte SD
+           par-dessus le flux Navidrome. */
+        if (audio_is_finished() && !g_loading && !nd_get_playing() && g_state != STATE_NIGHT_MODE && g_state != STATE_NAVIDROME && !nd_session_active()) {
             int n = pl_next(&g_playlist);
             if (n >= 0) play_current_track();
             else        audio_stop();
         }
 
-        /* Sauvegarde toutes les 2 min en arriere-plan */
-        if (++save_timer > 7200) { /* 2 min a 60fps */
+        /* Sauvegarde intelligente uniquement sur changement d'état (Zero freeze SD en plein morceau) */
+        if (++save_timer > 7200) {
             save_timer = 0;
             if (audio_get_state() == AUDIO_PLAYING) {
                 g_settings.last_position = audio_get_position();
                 g_settings.last_track    = g_playlist.current;
-                /* settings_save() est deja async (thread detache) */
-                /* donc pas de freeze sur le thread principal */
-                settings_mark_dirty();
+                /* Pas de settings_mark_dirty() automatique en plein milieu d'une chanson ! */
             }
         }
 
@@ -1444,6 +1871,7 @@ int main(int argc, char *argv[])
     g_settings.last_position = audio_get_position();
     g_settings.last_track    = g_playlist.current;
     settings_save_sync();
+    nd_temp_clear();   /* les morceaux Navidrome ecoutes ne survivent pas a la session */
 
     /* Eteindre LED */
     {
@@ -1483,4 +1911,409 @@ int main(int argc, char *argv[])
     gfxExit();
     romfsExit();
     return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   V0.98 : GETTERS ET FONCTIONS BROWSER / PICKER / REVEIL
+   ═══════════════════════════════════════════════════════════════ */
+
+const char* main_get_current_cwd(void) {
+    return g_browser.cwd[0] ? g_browser.cwd : "sdmc:/Music";
+}
+
+const char* main_get_start_dir(void) {
+    const char *d = g_settings.start_dir;
+    if (strncmp(d, "custom:", 7) == 0) d += 7;
+    return (d[0] && strcmp(d, "sdmc:/Music") != 0) ? d : "sdmc:/Music";
+}
+
+/* Helper dessin texte Citro2D */
+static void picker_draw_text(float x, float y, float scale, u32 color, const char *text) {
+    if (!text || !text[0]) return;
+    static C2D_TextBuf buf = NULL;
+    if (!buf) buf = C2D_TextBufNew(256);
+    C2D_TextBufClear(buf);
+    C2D_Text c2d_text;
+    C2D_TextParse(&c2d_text, buf, text);
+    C2D_TextOptimize(&c2d_text);
+    C2D_DrawText(&c2d_text, C2D_WithColor, x, y, 0.5f, scale, scale, color);
+}
+
+/* Mini-explorateur intelligent (Dossier Custom & Musique Reveil) */
+static FileBrowser g_picker_fb;
+static bool        s_picker_is_file_mode = false;
+
+void dir_picker_start(void)
+{
+    s_picker_is_file_mode = false; /* Mode Choix de Dossier */
+    const char *start = main_get_start_dir();
+    fb_init(&g_picker_fb, start);
+    g_state = STATE_DIR_PICKER;
+}
+
+void file_picker_start(void)
+{
+    s_picker_is_file_mode = true; /* Mode Choix de Fichier Audio */
+    /* REVEIL4C : redemarrer dans le DOSSIER de la musique deja choisie
+       et non sur le chemin du fichier lui-meme (bug : on se retrouvait
+       "dans" SD:/Music/reveil.mp3). Fallback : dossier de depart. */
+    const char *start = main_get_start_dir();
+    if (g_settings.alarm_path[0]) {
+        static char s_pick_dir[512];
+        strncpy(s_pick_dir, g_settings.alarm_path, 511);
+        s_pick_dir[511] = 0;
+        char *slash = strrchr(s_pick_dir, '/');
+        if (slash && slash[1]) {
+            *slash = 0;
+            /* "sdmc:" seul -> "sdmc:/" */
+            if (!strchr(s_pick_dir, '/') &&
+                s_pick_dir[strlen(s_pick_dir) - 1] == ':' &&
+                strlen(s_pick_dir) < 500)
+                strcat(s_pick_dir, "/");
+            if (s_pick_dir[0]) start = s_pick_dir;
+        }
+    }
+    fb_init(&g_picker_fb, start);
+    g_state = STATE_DIR_PICKER;
+}
+
+void input_dir_picker(void)
+{
+    u32 kd   = g_input.down;
+    u32 held = g_input.held;
+
+    /* V0.98 : Commandes Tactiles pour le mini-explorateur */
+    if (g_input.touch_down) {
+        int tx = g_input.touch.px;
+        int ty = g_input.touch.py;
+
+        /* Fleche HAUT a droite */
+        if (tx >= 280 && ty >= 20 && ty < 60) {
+            fb_select_prev(&g_picker_fb);
+        }
+        /* Fleche BAS a droite */
+        else if (tx >= 280 && ty >= 180 && ty < 220) {
+            fb_select_next(&g_picker_fb);
+        }
+        /* Liste principale */
+        else if (ty >= 20 && ty < 220) {
+            int row = (ty - 20) / 20;
+            int idx = g_picker_fb.scroll_offset + row;
+            if (idx >= 0 && idx < g_picker_fb.count) {
+                if (idx == g_picker_fb.selected) {
+                    kd |= KEY_A; /* Double tap = Simule la touche A */
+                } else {
+                    g_picker_fb.selected = idx;
+                    if (g_picker_fb.selected < g_picker_fb.scroll_offset)
+                        g_picker_fb.scroll_offset = g_picker_fb.selected;
+                    if (g_picker_fb.selected >= g_picker_fb.scroll_offset + g_picker_fb.visible_rows)
+                        g_picker_fb.scroll_offset = g_picker_fb.selected - g_picker_fb.visible_rows + 1;
+                }
+            }
+        }
+    }
+
+    /* B = Annuler et revenir aux parametres */
+    if (kd & KEY_B) {
+        g_state = STATE_SETTINGS;
+        return;
+    }
+
+    /* Y = Remonter au dossier parent (..) */
+    if (kd & KEY_Y) {
+        fb_go_up(&g_picker_fb);
+        return;
+    }
+
+    /* UNIFIED SCROLL PATTERN : Picker (Auto-repeat Haut/Bas + Gauche/Droite +-5) */
+    static u64 pk_ud_held = 0;
+    static bool pk_ud_rep = false;
+    if (held & (KEY_DOWN | KEY_UP)) {
+        if (!pk_ud_rep) {
+            if (pk_ud_held == 0) pk_ud_held = osGetTime();
+            if (osGetTime() - pk_ud_held > 400) pk_ud_rep = true;
+        }
+        if (pk_ud_rep) {
+            if (held & KEY_DOWN) fb_select_next(&g_picker_fb);
+            else                 fb_select_prev(&g_picker_fb);
+        }
+    } else { pk_ud_held = 0; pk_ud_rep = false; }
+
+    if (kd & KEY_DOWN) fb_select_next(&g_picker_fb);
+    if (kd & KEY_UP)   fb_select_prev(&g_picker_fb);
+    if (kd & KEY_RIGHT) for (int i = 0; i < 5; i++) fb_select_next(&g_picker_fb);
+    if (kd & KEY_LEFT)  for (int i = 0; i < 5; i++) fb_select_prev(&g_picker_fb);
+
+    if (s_picker_is_file_mode) {
+        /* === MODE SELECTION FICHIER AUDIO (REVEIL) === */
+        if (kd & KEY_A) {
+            if (g_picker_fb.count > 0 && g_picker_fb.selected >= 0 && g_picker_fb.selected < g_picker_fb.count) {
+                FileEntry *fe = &g_picker_fb.entries[g_picker_fb.selected];
+                if (!strcmp(fe->name, "..")) {
+                    fb_go_up(&g_picker_fb);
+                } else if (fe->is_dir) {
+                    fb_enter_dir(&g_picker_fb, fe->full_path);
+                } else if (fe->is_audio) {
+                    /* Fichier audio choisi -> Enregistrer pour le reveil */
+                    strncpy(g_settings.alarm_path, fe->full_path, 511);
+                    g_settings.alarm_path[511] = 0;
+                    settings_mark_dirty();
+                    g_state = STATE_SETTINGS;
+                }
+            }
+        }
+    } else {
+        /* === MODE SELECTION DOSSIER (START DIR) === */
+        if (kd & KEY_X) {
+            /* X = Valider le dossier courant immediatement */
+            snprintf(g_settings.start_dir, 512, "custom:%s", g_picker_fb.cwd);
+            settings_mark_dirty();
+            g_state = STATE_SETTINGS;
+            return;
+        }
+
+        if (kd & KEY_A) {
+            if (g_picker_fb.count > 0 && g_picker_fb.selected >= 0 && g_picker_fb.selected < g_picker_fb.count) {
+                FileEntry *fe = &g_picker_fb.entries[g_picker_fb.selected];
+                if (!strcmp(fe->name, "..")) {
+                    fb_go_up(&g_picker_fb);
+                } else if (fe->is_dir) {
+                    fb_enter_dir(&g_picker_fb, fe->full_path);
+                } else {
+                    snprintf(g_settings.start_dir, 512, "custom:%s", g_picker_fb.cwd);
+                    settings_mark_dirty();
+                    g_state = STATE_SETTINGS;
+                }
+            } else {
+                snprintf(g_settings.start_dir, 512, "custom:%s", g_picker_fb.cwd);
+                settings_mark_dirty();
+                g_state = STATE_SETTINGS;
+            }
+        }
+    }
+}
+
+void dir_picker_draw_top(void)
+{
+    Theme *th = current_theme;
+    u32 bg_col = th ? th->bg_primary : C2D_Color32(20,20,30,255);
+    u32 bg_sec = th ? th->bg_secondary : C2D_Color32(40,40,60,255);
+    u32 text_p = th ? th->text_primary : C2D_Color32(255,255,255,255);
+    u32 text_s = th ? th->text_secondary : C2D_Color32(200,200,200,255);
+    u32 accent = th ? th->accent : C2D_Color32(0,180,255,255);
+
+    C2D_TargetClear(g_3d_eye == 0 ? g_top : (g_top_right ? g_top_right : g_top), bg_col);
+    C2D_SceneBegin(g_3d_eye == 0 ? g_top : (g_top_right ? g_top_right : g_top));
+
+    /* Barre superieure */
+    C2D_DrawRectSolid(0, 0, 0, TOP_WIDTH, 24, bg_sec);
+    
+    if (s_picker_is_file_mode) {
+        picker_draw_text(10, 3, 0.5f, text_p, "CHOISIR UNE MUSIQUE DE REVEIL");
+        picker_draw_text(10, 38, 0.44f, accent, "Dossier actuel :");
+        picker_draw_text(10, 58, 0.42f, text_p, g_picker_fb.cwd);
+
+        picker_draw_text(10, 110, 0.38f, text_s, "A : Entrer dossier / Choisir musique");
+        picker_draw_text(10, 130, 0.38f, text_s, "Y : Dossier parent (..)");
+        picker_draw_text(10, 150, 0.38f, text_s, "B : Annuler");
+    } else {
+        picker_draw_text(10, 3, 0.5f, text_p, "CHOISIR DOSSIER DE DEMARRAGE");
+        picker_draw_text(10, 38, 0.44f, accent, "Dossier actuel :");
+        picker_draw_text(10, 58, 0.42f, text_p, g_picker_fb.cwd);
+
+        picker_draw_text(10, 105, 0.38f, text_s, "A : Entrer dans le dossier");
+        picker_draw_text(10, 125, 0.38f, text_s, "X : Valider ce dossier comme Custom");
+        picker_draw_text(10, 145, 0.38f, text_s, "Y : Dossier parent (..)");
+        picker_draw_text(10, 165, 0.38f, text_s, "B : Annuler");
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   V0.98 : MODE NUIT (REVEIL ECO+) - 100% ECO BATTERIE
+   ═══════════════════════════════════════════════════════════════ */
+void night_mode_start(void)
+{
+    g_state = STATE_NIGHT_MODE;
+
+    /* 1. Mettre en pause la musique pour conserver la piste et la position actuelle sans consommer de CPU */
+    if (audio_get_state() == AUDIO_PLAYING) {
+        audio_pause();
+    }
+
+    /* 2. Mettre le volume Master NDSP a 0 */
+    ndspSetMasterVol(0.0f);
+
+    /* 3. Bloquer la touche HOME pendant la nuit */
+    aptSetHomeAllowed(false);
+
+    /* 4. Couper la 3D et sa LED verte */
+    gfxSet3D(false);
+
+    /* 5. Eteindre le retroeclairage des DEUX ecrans (Haut + Bas) */
+    gspLcdInit();
+    GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_TOP | GSPLCD_SCREEN_BOTTOM);
+    gspLcdExit();
+
+    /* 6. Couper le Wi-Fi pour economiser la batterie */
+    wifi_manager_disable();
+
+    /* 7. Desactiver les visualiseurs */
+    audio_set_viz_active(false);
+
+    /* 8. Baisser la frequence CPU sur New 3DS */
+    if (g_is_new3ds) {
+        osSetSpeedupEnable(false);
+    }
+
+    /* 9. Eteindre la LED de notification */
+    {
+        mcuHwcInit();
+        InfoLedPattern off = {0};
+        off.delay = 0x10;
+        off.loopDelay = 0xFF;
+        MCUHWC_SetInfoLedPattern(&off);
+        mcuHwcExit();
+    }
+}
+
+void night_mode_stop(void)
+{
+    /* 1. Restaurer le volume Master NDSP */
+    ndspSetMasterVol(1.0f);
+
+    /* REVEIL1 : reveil alarme/manuel -> volume retourne a 100% */
+    audio_set_volume(1.0f);
+    g_settings.volume = 1.0f;
+    settings_mark_dirty();
+
+    /* 2. Reactiver la 3D et sa LED */
+    gfxSet3D(true);
+
+    /* 3. Re-autoriser le bouton HOME */
+    aptSetHomeAllowed(true);
+
+    /* 4. Rallumer le retroeclairage des DEUX ecrans et restaurer la luminosite */
+    gspLcdInit();
+    GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_TOP | GSPLCD_SCREEN_BOTTOM);
+    int lum = g_settings.eco_restore_brightness;
+    if (lum < 1 || lum > 5) lum = 5;
+    GSPLCD_SetBrightness(GSPLCD_SCREEN_TOP | GSPLCD_SCREEN_BOTTOM, lum);
+    gspLcdExit();
+
+    /* 5. Reactiver le Wi-Fi si autorise */
+    if (!g_settings.wifi_off_in_app) {
+        wifi_manager_enable();
+    }
+
+    /* 6. Reactiver les visualiseurs */
+    audio_set_viz_active(true);
+
+    /* 7. Restaurer le CPU Speedup sur New 3DS */
+    if (g_is_new3ds) {
+        osSetSpeedupEnable(true);
+    }
+
+    if (g_state == STATE_NIGHT_MODE) {
+        g_state = STATE_SETTINGS;
+    }
+}
+
+void input_night_mode(void)
+{
+    u32 kd = g_input.down;
+
+    /* SEULEMENT la touche B permet de quitter le Mode Nuit manuellement */
+    if (kd & KEY_B) {
+        night_mode_stop();
+    }
+}
+
+void night_mode_draw(void)
+{
+    /* Ecran Noir total sur les deux ecrans */
+    C2D_TargetClear(g_top, C2D_Color32(0, 0, 0, 255));
+    if (g_top_right) C2D_TargetClear(g_top_right, C2D_Color32(0, 0, 0, 255));
+    C2D_TargetClear(g_bot, C2D_Color32(0, 0, 0, 255));
+
+    /* Sleep 500ms = Boucle a 2 FPS -> Sommeil profond CPU 99.8% ! */
+    svcSleepThread(500000000ULL);
+}
+
+/* ND1 V0.99 : entree du mode Navidrome (appele depuis settings.c) */
+void navidrome_start(void)
+{
+    extern void nd_enter(void);
+    g_state = STATE_NAVIDROME;
+    nd_enter();
+}
+
+/* Declencheur Alarme Reveil en arriere-plan */
+static int s_last_alarm_min = -1;
+
+static void check_alarm_trigger(void)
+{
+    /* REVEIL4A : l'alarme vient d'etre (re)activee ou l'heure vient
+       d'etre modifiee ? Si l'heure choisie == heure actuelle, on marque
+       la minute comme deja traitee : pas de sonnerie immediate, ca
+       sonnera demain. (retour pote V0.98) */
+    {
+        static int s_pa_en = -1, s_pa_h = -1, s_pa_m = -1;
+        if ((int)g_settings.alarm_enabled != s_pa_en ||
+            g_settings.alarm_hour != s_pa_h ||
+            g_settings.alarm_minute != s_pa_m) {
+            s_pa_en = (int)g_settings.alarm_enabled;
+            s_pa_h  = g_settings.alarm_hour;
+            s_pa_m  = g_settings.alarm_minute;
+            if (g_settings.alarm_enabled) {
+                time_t t0 = time(NULL);
+                struct tm *l0 = localtime(&t0);
+                if (l0 && l0->tm_hour == g_settings.alarm_hour &&
+                    l0->tm_min == g_settings.alarm_minute)
+                    s_last_alarm_min = l0->tm_min;
+            }
+        }
+    }
+
+    if (!g_settings.alarm_enabled) return;
+
+    time_t now_t = time(NULL);
+    struct tm *lt = localtime(&now_t);
+    if (!lt) return;
+
+    int hour = lt->tm_hour;
+    int minute = lt->tm_min;
+
+    if (hour == g_settings.alarm_hour && minute == g_settings.alarm_minute) {
+        if (s_last_alarm_min != minute) {
+            s_last_alarm_min = minute;
+
+            /* REVEIL1C : le reveil sonne -> volume 100% quel que
+               soit l'etat d'ou il part (nuit, lecteur, navigate ur) */
+            audio_set_volume(1.0f);
+            g_settings.volume = 1.0f;
+            settings_mark_dirty();
+
+            /* Sortir du Mode Nuit si actif (rallume ecrans, 3D, wifi, home, volume...) */
+            if (g_state == STATE_NIGHT_MODE) {
+                night_mode_stop();
+            }
+
+            /* Determiner quelle piste jouer (Custom ou piste actuelle) */
+            const char *target_path = NULL;
+            if (g_settings.alarm_path[0] != '\0') {
+                target_path = g_settings.alarm_path;
+            } else if (g_playlist.count > 0 && g_playlist.current >= 0 && g_playlist.current < g_playlist.count) {
+                target_path = g_playlist.items[g_playlist.current].path;
+            }
+
+            if (target_path && target_path[0] != '\0') {
+                load_and_play(target_path); /* Charge la musique + LA POCHETTE + passe en STATE_PLAYER ! */
+            } else if (audio_get_state() != AUDIO_PLAYING) {
+                audio_play();
+                g_state = STATE_PLAYER;
+            }
+        }
+    } else {
+        s_last_alarm_min = -1;
+    }
 }

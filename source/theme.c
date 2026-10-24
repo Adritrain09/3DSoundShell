@@ -1,6 +1,6 @@
 // theme.c — Système multi-thèmes
 // Thèmes intégrés : Dark, Light, Neon Purple, Forest
-// Thèmes custom   : sdmc:/3DSoundShell/themes/*.ini (max 16)
+// Thèmes custom   : sdmc:/3DSoundShell/themes/*.ini (max 128)
 
 #include "theme.h"
 #include <stdio.h>

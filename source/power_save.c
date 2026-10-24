@@ -1,3 +1,5 @@
+static bool s_just_exited_b = false;
+static bool s_exiting_b_lock = false;
 // power_save.c - Mode economie energie (V0.97 propre)
 #include "power_save.h"
 #include "main.h"
@@ -98,6 +100,7 @@ void power_save_activate(void)
 
 void power_save_deactivate(void)
 {
+    s_exiting_b_lock = true;
     if (!s_active) return;
     s_active = false;
 
@@ -194,6 +197,29 @@ void power_save_update(u32 keys_pressed, bool touch_down)
     u64 now = osGetTime();
 
     if (s_active) {
+        /* V0.98 : Re-appliquer le backlight/lum toutes les 3 sec
+           (protection si systeme remet la lum au branchement chargeur ou clapet) */
+        static u64 last_reapply = 0;
+        if (now - last_reapply > 3000) {
+            last_reapply = now;
+            gspLcdInit();
+            u8 model = 0;
+            CFGU_GetSystemModel(&model);
+            bool is_2ds = (model == 3 || model == 5);
+            int mode = g_settings.eco_backlight_mode;
+            /* Ecran bas toujours OFF */
+            if (!is_2ds) {
+                GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTTOM);
+                s_bottom_off = true;
+            }
+            if (mode == 1) {
+                GSPLCD_SetBrightness(GSPLCD_SCREEN_TOP, 1);
+            } else if (mode == 2 && !is_2ds) {
+                GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_TOP);
+            }
+            gspLcdExit();
+        }
+
         /* En mode eco : SEUL B hold 500ms fait sortir */
         if (keys_pressed & KEY_B) {
             if (s_hold_start_ms == 0) {
@@ -269,6 +295,19 @@ void power_save_draw_top(const AudioMetadata *meta)
                      TOP_WIDTH - 8, 8, 0, 0.42f, 0.42f, tcol);
     }
 
+    /* V0.98 : Alarme indicateur si activee */
+    if (g_settings.alarm_enabled) {
+        char astr[32];
+        snprintf(astr, sizeof(astr), "ALARM %02d:%02d", g_settings.alarm_hour, g_settings.alarm_minute);
+        float ay = sleep_timer_is_active() ? 24.0f : 8.0f;
+        u32 acol = settings_get_power_save_color();
+        C2D_Text tx_alm;
+        C2D_TextParse(&tx_alm, s_ps_textbuf, astr);
+        C2D_TextOptimize(&tx_alm);
+        C2D_DrawText(&tx_alm, C2D_AlignRight | C2D_WithColor,
+                     TOP_WIDTH - 8, ay, 0, 0.40f, 0.40f, acol);
+    }
+
     /* Horloge */
     time_t t = time(NULL);
     struct tm *tm_info = localtime(&t);
@@ -321,7 +360,7 @@ void power_save_draw_top(const AudioMetadata *meta)
     /* Hint centre */
     ps_draw_text(TOP_WIDTH / 2.f, TOP_HEIGHT - 25, 0.35f,
                  C2D_Color32(60, 60, 80, 255),
-                 T("Maintenir B (0.5s) pour quitter le mode eco"));
+                 T("Maintenir B (~0.5s) pour quitter le mode eco"));
     ps_draw_text(TOP_WIDTH / 2.f, TOP_HEIGHT - 10, 0.38f,
                  C2D_Color32(80, 80, 110, 255),
                  T("Commandes ralenties en mode eco"));
@@ -360,4 +399,28 @@ void power_save_draw_top(const AudioMetadata *meta)
     float fill_w = (float)pct / 100.f * 14.f;
     C2D_DrawRectSolid(bx+2, by+2, 0, fill_w, 6, batt_col);
     C2D_DrawRectSolid(bx+18, by+3, 0, 2, 4, batt_col);
+}
+
+bool power_save_is_b_locked(u32 held_keys)
+{
+    if (s_exiting_b_lock) {
+        if (!(held_keys & KEY_B)) {
+            s_exiting_b_lock = false;
+            return true; /* Absorbe aussi la frame exacte du relachement */
+        }
+        return true; /* Absorbe le maintien */
+    }
+    return false;
+}
+
+bool power_save_should_suppress_b(void) {
+    if (s_just_exited_b) {
+        u32 held = hidKeysHeld();
+        if (!(held & KEY_B)) {
+            s_just_exited_b = false;
+            return false;
+        }
+        return true;
+    }
+    return false;
 }

@@ -22,6 +22,7 @@
 #include "dr_wav.h"
 #include <mpg123.h>
 #include <opusfile.h>
+#include "mp4_aac.h"          /* AAC12 : peek metas explorateur */
 
 static PreviewInfo   s_cache[PREVIEW_CACHE_SIZE];
 static LightLock     s_cache_lock;
@@ -100,58 +101,64 @@ static u8 *extract_id3v2_cover_data(const char *path, u32 *out_size)
     *out_size = 0;
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
+
     u8 hdr[10];
-    if (fread(hdr, 1, 10, f) != 10 || memcmp(hdr, "ID3", 3)) {
-        fclose(f); return NULL;
+    if (fread(hdr, 1, 10, f) != 10 || memcmp(hdr, "ID3", 3) != 0) {
+        fclose(f);
+        return NULL;
     }
-    int ver = hdr[3];
-    u32 tag_size = ((hdr[6]&0x7F)<<21)|((hdr[7]&0x7F)<<14)|((hdr[8]&0x7F)<<7)|(hdr[9]&0x7F);
-    u32 pos = 0;
-    u8 fh[10];
-    while (pos + 10 < tag_size) {
-        if (fread(fh, 1, 10, f) != 10) break;
-        pos += 10;
-        u32 fsz;
-        if (ver >= 4)
-            fsz = ((fh[4]&0x7F)<<21)|((fh[5]&0x7F)<<14)|((fh[6]&0x7F)<<7)|(fh[7]&0x7F);
-        else
-            fsz = (fh[4]<<24)|(fh[5]<<16)|(fh[6]<<8)|fh[7];
-        if (fsz == 0 || fsz > tag_size) break;
-        if (memcmp(fh, "APIC", 4) == 0) {
-            u8 *data = malloc(fsz);
-            if (!data) break;
-            if (fread(data, 1, fsz, f) != (size_t)fsz) { free(data); break; }
-            u32 off = 1;
-            while (off < fsz && data[off]) off++;
-            off++;
-            if (off >= fsz) { free(data); break; }
-            off++;
-            while (off < fsz && data[off]) off++;
-            off++;
-            if (off < fsz) {
-                u32 isz = fsz - off;
-                u8 *img = malloc(isz);
-                if (img) {
-                    memcpy(img, data + off, isz);
-                    *out_size = isz;
-                    free(data);
-                    fclose(f);
-                    return img;
-                }
-            }
-            free(data);
+
+    u32 tag_size = ((hdr[6] & 0x7F) << 21) | ((hdr[7] & 0x7F) << 14) | ((hdr[8] & 0x7F) << 7) | (hdr[9] & 0x7F);
+    if (tag_size == 0 || tag_size > 10 * 1024 * 1024) {
+        fclose(f);
+        return NULL;
+    }
+
+    u8 *tag_buf = (u8*)malloc(tag_size);
+    if (!tag_buf) { fclose(f); return NULL; }
+
+    size_t read_bytes = fread(tag_buf, 1, tag_size, f);
+    fclose(f);
+
+    if (read_bytes < tag_size) {
+        free(tag_buf);
+        return NULL;
+    }
+
+    u8 *img_start = NULL;
+    u32 img_size = 0;
+
+    for (u32 j = 0; j < read_bytes - 4; j++) {
+        /* Magic JPEG: FF D8 FF */
+        if (tag_buf[j] == 0xFF && tag_buf[j+1] == 0xD8 && tag_buf[j+2] == 0xFF) {
+            img_start = tag_buf + j;
+            img_size = (u32)(read_bytes - j);
             break;
-        } else {
-            fseek(f, (long)fsz, SEEK_CUR);
-            pos += fsz;
+        }
+        /* Magic PNG: 89 50 4E 47 */
+        if (tag_buf[j] == 0x89 && tag_buf[j+1] == 'P' && tag_buf[j+2] == 'N' && tag_buf[j+3] == 'G') {
+            img_start = tag_buf + j;
+            img_size = (u32)(read_bytes - j);
+            break;
         }
     }
-    fclose(f);
+
+    if (img_start && img_size > 0) {
+        u8 *ret_buf = (u8*)malloc(img_size);
+        if (ret_buf) {
+            memcpy(ret_buf, img_start, img_size);
+            *out_size = img_size;
+            free(tag_buf);
+            return ret_buf;
+        }
+    }
+
+    free(tag_buf);
     return NULL;
 }
 
 typedef enum {
-    PF_UNKNOWN, PF_OGG, PF_WAV, PF_FLAC, PF_MP3, PF_OPUS
+    PF_UNKNOWN, PF_OGG, PF_WAV, PF_FLAC, PF_MP3, PF_OPUS, PF_M4A
 } PreviewFormat;
 
 static PreviewFormat detect_format(const char *path, char *out_ext)
@@ -172,6 +179,7 @@ static PreviewFormat detect_format(const char *path, char *out_ext)
     if (!strcasecmp(e,"wav"))                           return PF_WAV;
     if (!strcasecmp(e,"mp3") || !strcasecmp(e,"mp2"))  return PF_MP3;
     if (!strcasecmp(e,"opus"))                          return PF_OPUS;
+    if (0==strcasecmp(e,"m4a") || 0==strcasecmp(e,"mp4") || 0==strcasecmp(e,"aac"))  return PF_M4A;   /* AAC15 */
     return PF_UNKNOWN;
 }
 
@@ -199,6 +207,7 @@ static int cache_lru_slot(void)
 }
 
 
+extern int mp4_aac_peek(const char *path, char *title, char *artist, char *album, int cap, u8 **cover, u32 *cover_size, u32 *rate, u32 *channels, u32 *duration_sec);   /* AAC12c */
 static void load_metadata(PreviewInfo *p, const char *path)
 {
     memset(p, 0, sizeof(PreviewInfo));
@@ -324,6 +333,19 @@ static void load_metadata(PreviewInfo *p, const char *path)
             op_free(op);
             break;
         }
+        case PF_M4A: {
+            /* AAC13 : MP4/m4a/aac via mp4_aac_peek (reentrant) */
+            uint32_t rr = 0, cc = 0, dd = 0;
+            int okp = mp4_aac_peek(path, p->title, p->artist, p->album, 256,
+                                   NULL, NULL, &rr, &cc, &dd);
+            if (!okp) { p->valid = false; p->loaded = true; return; }
+            p->sample_rate = (int)rr;
+            p->channels    = (int)cc;
+            p->duration_sec = (int)dd;
+            if (p->duration_sec > 0)
+                p->bitrate_kbps = (int)((p->file_size * 8) / (p->duration_sec * 1000));
+            break;
+        }
         default:
             p->valid = false;
             p->loaded = true;
@@ -335,14 +357,265 @@ static void load_metadata(PreviewInfo *p, const char *path)
     
 }
 
+/* ================================================================
+   ND19 : pochettes FLAC/OGG/OPUS (explorateur + lecteur).
+   FLAC : scan manuel des blocs metadata, type 6 = PICTURE.
+   OGG/OPUS : commentaire METADATA_BLOCK_PICTURE en base64.
+   ================================================================ */
+static int nd19_b64val(char c)
+{ if (c>='A'&&c<='Z') return c-'A'; if (c>='a'&&c<='z') return c-'a'+26;
+  if (c>='0'&&c<='9') return c-'0'+52; if (c=='+') return 62; if (c=='/') return 63; return -1; }
+
+static void *nd19_b64_decode(const char *s, uint32_t slen, uint32_t *outlen)
+{
+    uint32_t cap = slen/4*3 + 4, pos = 0, i;
+    int acc = 0, nbits = 0;
+    uint8_t *out = (uint8_t *)malloc(cap);
+    if (!out) return NULL;
+    for (i = 0; i < slen; i++) {
+        int v = nd19_b64val(s[i]);
+        if (v < 0) continue;
+        acc = (acc << 6) | v; nbits += 6;
+        if (nbits >= 8) { nbits -= 8; out[pos++] = (uint8_t)((acc >> nbits) & 0xFF); }
+    }
+    *outlen = pos;
+    return out;
+}
+
+static void *nd19_picture_body(const uint8_t *p, uint32_t len, uint32_t *imglen)
+{
+    uint32_t pos, ml, dl, dl2;
+    if (len < 36 || !imglen) return NULL;
+    ml = ((uint32_t)p[4]<<24)|((uint32_t)p[5]<<16)|((uint32_t)p[6]<<8)|p[7];
+    pos = 8;
+    if (pos + ml + 4 > len) return NULL;
+    pos += ml;
+    dl = ((uint32_t)p[pos]<<24)|((uint32_t)p[pos+1]<<16)|((uint32_t)p[pos+2]<<8)|p[pos+3];
+    pos += 4;
+    if (pos + dl + 20 > len) return NULL;
+    pos += dl;
+    pos += 16;
+    dl2 = ((uint32_t)p[pos]<<24)|((uint32_t)p[pos+1]<<16)|((uint32_t)p[pos+2]<<8)|p[pos+3];
+    pos += 4;
+    if (pos + dl2 > len) return NULL;
+    *imglen = dl2;
+    return (void *)(p + pos);
+}
+
+static stb_vorbis_comment nd19_sc;
+static stb_vorbis *nd19_lv = NULL;
+static int nd19_ci = 0;
+static char *nd19_ogg_next(stb_vorbis *v)
+{
+    if (v != nd19_lv) { nd19_lv = v; nd19_sc = stb_vorbis_get_comment(v); nd19_ci = 0; }
+    if (nd19_ci >= nd19_sc.comment_list_length) { nd19_lv = NULL; return NULL; }
+    return nd19_sc.comment_list[nd19_ci++];
+}
+void *nd19_flac_picture(const char *path, uint32_t *imglen)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t hdr[4];
+    uint32_t guard = 0;
+    void *img = NULL;
+    if (!f) return NULL;
+    if (fread(hdr, 1, 4, f) != 4 || memcmp(hdr, "fLaC", 4) != 0) { fclose(f); return NULL; }
+    while (guard++ < 128) {
+        uint8_t bh[4];
+        uint32_t blen, btype;
+        if (fread(bh, 1, 4, f) != 4) break;
+        btype = bh[0] & 0x7F;
+        blen = ((uint32_t)bh[1]<<16)|((uint32_t)bh[2]<<8)|bh[3];
+        if (blen == 0 || blen > 16u*1024u*1024u) break;
+        if (btype == 6) {
+            uint8_t *body = (uint8_t *)malloc(blen);
+            if (!body) break;
+            if (fread(body, 1, blen, f) == blen) {
+                uint32_t il = 0;
+                void *pp = nd19_picture_body(body, blen, &il);
+                if (pp && il > 0 && il < 8u*1024u*1024u) {
+                    img = malloc(il);
+                    if (img) { memcpy(img, pp, il); *imglen = il; }
+                }
+            }
+            free(body);
+            if (img) { nd19_lv = NULL; break; }
+        } else {
+            if (fseek(f, (long)blen, SEEK_CUR)) break;
+        }
+        if (bh[0] & 0x80) break;
+    }
+    fclose(f);
+    return img;
+}
+
+static void *nd19_ogg_picture(const char *path, uint32_t *imglen)
+{
+    int err = 0;
+    void *img = NULL;
+    stb_vorbis *v = stb_vorbis_open_filename(path, &err, NULL);
+    if (!v) return NULL;
+    for (;;) {
+        char *c = NULL;
+        c = nd19_ogg_next(v); if (!c) break;
+        if (strncasecmp(c, "METADATA_BLOCK_PICTURE=", 23) == 0) {
+            uint32_t bl = 0, il = 0;
+            void *blk = nd19_b64_decode(c + 23, (uint32_t)strlen(c + 23), &bl);
+            if (blk) {
+                void *pp = nd19_picture_body((const uint8_t *)blk, bl, &il);
+                if (pp && il > 0 && il < 8u*1024u*1024u) {
+                    img = malloc(il);
+                    if (img) { memcpy(img, pp, il); *imglen = il; }
+                }
+                free(blk);
+            }
+            if (img) { nd19_lv = NULL; break; }
+        }
+    }
+    stb_vorbis_close(v);
+    return img;
+}
+
+void *nd19_opus_picture(const char *path, uint32_t *imglen)
+{
+    int err = 0;
+    void *img = NULL;
+    OggOpusFile *of = op_open_file(path, &err);
+    if (!of) return NULL;
+    {
+        const OpusTags *tags = op_tags(of, -1);
+        if (tags) {
+            const char *vv = opus_tags_query(tags, "METADATA_BLOCK_PICTURE", 0);
+            if (vv) {
+                uint32_t bl = 0, il = 0;
+                void *blk = nd19_b64_decode(vv, (uint32_t)strlen(vv), &bl);
+                if (blk) {
+                    void *pp = nd19_picture_body((const uint8_t *)blk, bl, &il);
+                    if (pp && il > 0 && il < 8u*1024u*1024u) {
+                        img = malloc(il);
+                        if (img) { memcpy(img, pp, il); *imglen = il; }
+                    }
+                    free(blk);
+                }
+            }
+        }
+    }
+    op_free(of);
+    return img;
+}
+
+/* ================================================================
+   ND21 : pochette WAV = chunk "ID3 " dans le RIFF (comme VLC).
+   Parse ID3v2.3/2.4 -> frame APIC -> donnees image brutes.
+   ================================================================ */
+static void *nd21_id3_apic(const uint8_t *d, uint32_t len, uint32_t *imglen)
+{
+    uint32_t pos, tsize;
+    int ver;
+    if (len < 10 || d[0] != 'I' || d[1] != 'D' || d[2] != '3') return NULL;
+    if (d[5] & 0x80) return NULL;              /* unsync global : non supporte */
+    ver = d[3];
+    tsize = ((uint32_t)(d[6]&0x7F)<<21)|((uint32_t)(d[7]&0x7F)<<14)|
+            ((uint32_t)(d[8]&0x7F)<<7)|(uint32_t)(d[9]&0x7F);
+    if (10 + tsize > len) tsize = len - 10;
+    pos = 10;
+    while (pos + 10 <= 10 + tsize) {
+        uint32_t fsz, o, fl;
+        const uint8_t *f;
+        uint8_t enc;
+        if (d[pos] == 0) break;
+        if (ver == 4)
+            fsz = ((uint32_t)(d[pos+4]&0x7F)<<21)|((uint32_t)(d[pos+5]&0x7F)<<14)|
+                  ((uint32_t)(d[pos+6]&0x7F)<<7)|(uint32_t)(d[pos+7]&0x7F);
+        else
+            fsz = ((uint32_t)d[pos+4]<<24)|((uint32_t)d[pos+5]<<16)|
+                  ((uint32_t)d[pos+6]<<8)|d[pos+7];
+        if (fsz == 0 || pos + 10 + fsz > 10 + tsize) break;
+        if (d[pos]=='A' && d[pos+1]=='P' && d[pos+2]=='I' && d[pos+3]=='C') {
+            f = d + pos + 10; fl = fsz;
+            enc = f[0]; o = 1;
+            while (o < fl && f[o]) o++;        /* mime nul-termine */
+            o++;
+            if (o + 1 >= fl) return NULL;
+            o++;                                /* picture type */
+            if (enc == 1 || enc == 2) {         /* UTF-16 : desc double-nul */
+                while (o + 1 < fl && (f[o] != 0 || f[o+1] != 0)) o += 2;
+                o += 2;
+            } else {
+                while (o < fl && f[o]) o++;
+                o++;
+            }
+            if (o >= fl) return NULL;
+            *imglen = fl - o;
+            return (void *)(f + o);
+        }
+        pos += 10 + fsz;
+    }
+    return NULL;
+}
+
+void *nd21_wav_picture(const char *path, uint32_t *imglen)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t h[12];
+    uint32_t guard = 0;
+    void *img = NULL;
+    if (!f) return NULL;
+    if (fread(h, 1, 12, f) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
+        fclose(f); return NULL;
+    }
+    while (guard++ < 256) {
+        uint8_t cb[8];
+        uint32_t csz;
+        if (fread(cb, 1, 8, f) != 8) break;
+        csz = (uint32_t)cb[4] | ((uint32_t)cb[5]<<8) | ((uint32_t)cb[6]<<16) | ((uint32_t)cb[7]<<24);
+        if (csz > 64u*1024u*1024u) break;
+        if (memcmp(cb, "ID3 ", 4) == 0 || memcmp(cb, "id3 ", 4) == 0) {   /* ND22a */
+            uint8_t *buf = (uint8_t *)malloc(csz);
+            if (!buf) break;
+            if (fread(buf, 1, csz, f) == csz) {
+                uint32_t il = 0;
+                void *pp = nd21_id3_apic(buf, csz, &il);
+                if (pp && il > 0 && il < 8u*1024u*1024u) {
+                    img = malloc(il);
+                    if (img) { memcpy(img, pp, il); *imglen = il; }
+                }
+            }
+            free(buf);
+            if (img) break;
+        } else {
+            if (fseek(f, (long)((csz + 1u) & ~1u), SEEK_CUR)) break;  /* pad pair */
+        }
+        if (feof(f)) break;
+    }
+    fclose(f);
+    return img;
+}
+
 static void process_cover_for_slot(int slot, const char *path)
 {
     char fmt_ext[8];
     PreviewFormat fmt = detect_format(path, fmt_ext);
-    if (fmt != PF_MP3) return;
-
     u32 cover_size = 0;
-    u8 *cover_data = extract_id3v2_cover_data(path, &cover_size);
+    u8 *cover_data = NULL;
+    if (fmt == PF_MP3) {
+        cover_data = extract_id3v2_cover_data(path, &cover_size);
+    } else if (fmt == PF_M4A) {
+        /* AAC12 : pochette embarquee covr (MP4) ; ADTS = aucune */
+        mp4_aac_peek(path, NULL, NULL, NULL, 0, &cover_data, &cover_size,
+                     NULL, NULL, NULL);
+    } else if (fmt == PF_FLAC) {
+        /* ND19 : bloc PICTURE FLAC */
+        cover_data = (u8 *)nd19_flac_picture(path, &cover_size);
+    } else if (fmt == PF_OGG) {
+        /* ND19 : METADATA_BLOCK_PICTURE base64 (vorbis) */
+        cover_data = (u8 *)nd19_ogg_picture(path, &cover_size);
+    } else if (fmt == PF_OPUS) {
+        /* ND19 : METADATA_BLOCK_PICTURE base64 (opus) */
+        cover_data = (u8 *)nd19_opus_picture(path, &cover_size);
+    } else if (fmt == PF_WAV) {
+        /* ND21 : chunk ID3 dans RIFF (comme VLC) */
+        cover_data = (u8 *)nd21_wav_picture(path, &cover_size);
+    } else return;
     if (!cover_data || cover_size == 0) {
         if (cover_data) free(cover_data);
         return;
@@ -466,7 +739,7 @@ void preview_init(void)
         s_lock_init = true;
     }
     s_thread_run = true;
-    s_thread = threadCreate(worker_thread, NULL, 64*1024, 0x3F, -1, false);
+    s_thread = threadCreate(worker_thread, NULL, 128*1024, 0x3F, -1, false);
 }
 
 void preview_exit(void)

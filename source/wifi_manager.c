@@ -36,6 +36,11 @@ void wifi_manager_disable(void)
 {
     if (!s_nwm_ext_ready || s_wifi_disabled) return;
 
+    /* SHIELD WIFI 3DSS : Interdiction absolue de couper le Wi-Fi si Navidrome est actif (browsing ou streaming) */
+    extern int g_state;
+    extern int nd_get_playing(void);
+    if (g_state == 7 || nd_get_playing()) return; /* 7 = STATE_NAVIDROME (main.h) */
+
     Result rc = NWMEXT_ControlWirelessEnabled(false);
     if (R_SUCCEEDED(rc)) {
         s_wifi_disabled = true;

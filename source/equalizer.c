@@ -71,6 +71,8 @@ void eq_draw_top(int selected_band)
     draw_text(start_x-30, bar_y_base+bar_area_h/2.f-6, 0.38f, th->text_disabled,"-12");
 
     /* ── Visualiseur en temps reel sous les barres EQ ── */
+    extern void audio_viz_tick(void);
+    audio_viz_tick();
     float viz_raw[EQ_SCREEN_BANDS];
     audio_get_visualizer(viz_raw);
 
@@ -219,14 +221,15 @@ void eq_draw_bottom(int selected_band)
     /* Preset actif */
     extern EQPreset eq_preset_flat, eq_preset_bass_boost,
                     eq_preset_vocal, eq_preset_rock,
-                    eq_preset_classical, eq_preset_electronic;
+                    eq_preset_classical, eq_preset_electronic,
+                eq_preset_custom;
     const char *preset_names[] = {
-        "Flat","Bass Boost","Vocal","Rock","Classical","Electronic"
+        "Flat","Bass Boost","Vocal","Rock","Classical","Electronic","Custom"
     };
     draw_rect(0, BOT_HEIGHT-28, BOT_WIDTH, 28, th->bg_secondary);
     char preset_str[32];
     snprintf(preset_str, 32, "Preset: %s",
-        preset_names[g_settings.eq_preset_index % 6]);
+        preset_names[g_settings.eq_preset_index % 7]);
     draw_text(6, BOT_HEIGHT-22, 0.46f, th->accent, preset_str);
 }
 
@@ -240,14 +243,32 @@ void eq_handle_input(int *selected_band, u32 keys_down)
         float g=audio_eq_get_gain(*selected_band)+1.0f;
         if(g>12) g=12;
         audio_eq_set_gain(*selected_band,g);
+        g_settings.eq_gains_per_preset[g_settings.eq_preset_index][*selected_band] = g;
+        settings_mark_dirty();
     }
     if(keys_down & KEY_DOWN) {
         float g=audio_eq_get_gain(*selected_band)-1.0f;
         if(g<-12) g=-12;
         audio_eq_set_gain(*selected_band,g);
+        g_settings.eq_gains_per_preset[g_settings.eq_preset_index][*selected_band] = g;
+        settings_mark_dirty();
     }
     if(keys_down & KEY_X) {
-        for(int i=0;i<EQ_SCREEN_BANDS;i++)
-            audio_eq_set_gain(i,0.f);
+        static const float factory[7][8] = {
+            { 0, 0, 0, 0, 0, 0, 0, 0},
+            { 6, 5, 4, 1, 0, 0, 0, 0},
+            {-2,-1, 2, 4, 4, 3, 1, 0},
+            { 4, 3, 0,-1, 0, 2, 4, 5},
+            { 3, 2, 0, 0, 0, 0, 2, 3},
+            { 5, 4, 0,-1, 1, 3, 4, 5},
+            { 0, 0, 0, 0, 0, 0, 0, 0}
+        };
+        int pi = g_settings.eq_preset_index;
+        if (pi < 0 || pi > 6) pi = 0;
+        for(int i = 0; i < EQ_SCREEN_BANDS; i++) {
+            audio_eq_set_gain(i, factory[pi][i]);
+            g_settings.eq_gains_per_preset[pi][i] = factory[pi][i];
+        }
+        settings_mark_dirty();
     }
 }

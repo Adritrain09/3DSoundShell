@@ -17,7 +17,7 @@ static bool is_audio(const char *n)
 {
     const char *exts[] = {
         ".mp3",".mp2",".ogg",".oga",".flac",
-        ".wav",".opus",NULL
+        ".wav",".opus",".m4a",".mp4",".aac",NULL
     };
     const char *d = strrchr(n,'.');
     if (!d) return false;
