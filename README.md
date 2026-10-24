@@ -16,12 +16,12 @@ README généré par claude.ai et modifié par.. bas.. moi:
 
 ## ✨ Fonctionnalités
 
-- 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS.
+- 🎵 **Formats supportés** : MP3, MP2, OGG, FLAC, WAV, OPUS, AAC, M4A, MP4.
 - 🎨 **Thèmes** : Dark, Light, Neon Purple, Forest — et 128 thèmes personnalisés via fichier .ini
 - 📁 **Explorateur de fichiers** style 3DShell (tri alphabétique, dossiers/fichiers, navigation complète)
 - 🔀 **Lecture aléatoire** (Fisher-Yates shuffle)
 - 🔁 **Répétition** : Désactivée / Une piste / Toute la playlist
-- 📊 **Visualiseur audio** : 4 styles (Barres, Onde, Cercle radial, EQ Pro)
+- 📊 **Visualiseur audio** : 10 styles (Barres, Onde, Cercle radial, effet Feu, Oscillo, Waves, Tunnel, Pulsion, Waveform, EQ Pro)
 - 🖼️ **Pochettes d'album** (sur les formats compatible)
 - 🎚️ **Égaliseur 8 bandes** : -12dB à +12dB, 6 présets intégrés
 - 💾 **Sauvegarde automatique** (piste, réglages, equalizer)
